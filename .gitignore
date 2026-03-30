@@ -1,0 +1,28 @@
+.playwright-mcp/
+.idea
+openapi.json
+uv.lock
+CLAUDE.md
+AGENTS.md
+PLAN.md
+
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Local data
+*.db
+.env
+llmproxy_validation.json
+llmproxy_models.json
+
+# Next.js frontend
+web/node_modules/
+web/.next/

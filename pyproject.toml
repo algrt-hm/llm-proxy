@@ -1,0 +1,20 @@
+[project]
+name = "llm-proxy"
+version = "0.1.0"
+description = "OpenAI-compatible LLM proxy for multiple providers"
+readme = "README.md"
+requires-python = ">=3.14.1"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "sqlalchemy",
+    "aiosqlite",
+    "pydantic",
+    "google-genai",
+    "greenlet",
+    "ruff>=0.14.14",
+    "pytest",
+    "pytest-asyncio",
+    "asyncpg>=0.31.0",
+]
