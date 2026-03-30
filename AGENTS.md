@@ -48,57 +48,53 @@
 │  ├─ test_response_cache.py # Response cache, idempotency cross-endpoint rejection, empty input validation, degenerate response rejection tests
 │  ├─ test_payload_passthrough.py  # Schema extra-field passthrough + URL builder tests
 │  └─ test_main_preflight.py # Preflight checks: `--require-db-url`, DB URL hostname validation, missing provider API keys
-├─ llmproxy/
-│  ├─ __init__.py           # Package version
-│  ├─ app.py                # FastAPI app, routing, proxy logic (chat + embeddings), tracing hooks
-│  ├─ providers.py          # Provider parsing, auth config, base URL + endpoint URL builders (chat + embeddings)
-│  ├─ gemini.py             # Gemini SDK adapter (chat + embeddings) + OpenAI response mapping
-│  ├─ schemas.py            # Pydantic request models (ChatCompletionRequest, EmbeddingRequest; extra=allow)
-│  ├─ db.py                 # SQLAlchemy async engine + trace/cache_hits tables + DB URL redaction
-│  ├─ retry.py              # Retry config, Retry-After parsing, Gemini retry-hint parsing, backoff delay
-│  ├─ ratelimit.py          # Client-side rate limiter (sliding window, RPM + TPM, per-model limits, stale eviction)
-│  ├─ tracing.py            # Trace persistence, cache-hit logging, provider/model-scoped idempotency + response-cache lookup
-│  ├─ validation.py         # Concurrent provider key validation + disk caching
-│  └─ models.py             # Concurrent per-provider model listing, models.dev enrichment + disk caching
-└─ web/                          # Next.js trace viewer frontend (App Router, TypeScript, Tailwind)
-   ├─ package.json               # Frontend deps (next, react, pg; tailwindcss in devDeps)
-   ├─ package-lock.json          # npm lockfile
-   ├─ next.config.ts             # Next.js config
-   ├─ tsconfig.json              # TypeScript config
-   ├─ eslint.config.mjs          # ESLint flat config
-   ├─ postcss.config.mjs         # PostCSS config (Tailwind)
-   ├─ src/lib/
-   │  ├─ db.ts                   # Shared Postgres pool (pg.Pool, DATABASE_URL)
-   │  ├─ api.ts                  # Client-side fetch wrappers for API routes
-   │  ├─ types.ts                # TypeScript interfaces (traces, stats, cache hits)
-   │  ├─ utils.ts                # Formatting helpers (latency, tokens, dates)
-   │  └─ constants.ts            # Time ranges, provider colors
-   ├─ src/app/
-   │  ├─ page.tsx                # Dashboard: summary cards, bar charts, stats table, token usage, cache hit rates
-   │  ├─ traces/page.tsx         # Traces: split-pane list + detail, filters, hide-embeddings toggle
-   │  ├─ traces/[id]/page.tsx    # Standalone trace detail (metadata + request/response JSON)
-   │  ├─ cache-hits/page.tsx     # Cache hits: split-pane list + detail, filters
-   │  └─ api/traces/             # Next.js API routes (query Postgres directly)
-   │     ├─ route.ts             # GET /api/traces — paginated trace list
-   │     ├─ [id]/route.ts        # GET /api/traces/:id — single trace with JSON bodies
-   │     ├─ stats/route.ts       # GET /api/traces/stats — aggregate stats + tok_think
-   │     ├─ providers/route.ts   # GET /api/traces/providers — distinct provider/model list
-   │     ├─ cache-hits/route.ts  # GET /api/traces/cache-hits — paginated cache hits
-   │     └─ cache-hits/stats/route.ts  # GET /api/traces/cache-hits/stats — cache hit rates
-   └─ src/components/
-      ├─ Nav.tsx                 # Sidebar navigation
-      ├─ JsonTree.tsx            # Recursive collapsible JSON viewer (expandAll support)
-      ├─ BarChart.tsx            # Pure SVG bar chart (formatValue support)
-      ├─ StatsTable.tsx          # Provider/model stats table (tok_think column)
-      ├─ TraceTable.tsx          # Trace list table (row selection)
-      ├─ TraceDetailPanel.tsx    # Inline trace detail for split-pane view
-      ├─ TraceFilters.tsx        # Provider/model/status/time filters + hide-embeddings
-      ├─ CacheHitTable.tsx       # Cache hit list table (row selection)
-      ├─ CacheHitDetailPanel.tsx # Inline cache hit detail for split-pane view
-      ├─ Pagination.tsx          # Prev/Next pagination
-      ├─ TimeRangeSelect.tsx     # 1h/6h/24h/7d/30d/All time range buttons
-      ├─ ProviderBadge.tsx       # Colored provider label
-      └─ StatusBadge.tsx         # Colored HTTP status badge
+└─ llmproxy/
+   ├─ __init__.py           # Package version
+   ├─ app.py                # FastAPI app, routing, proxy logic (chat + embeddings), tracing hooks
+   ├─ providers.py          # Provider parsing, auth config, base URL + endpoint URL builders (chat + embeddings)
+   ├─ gemini.py             # Gemini SDK adapter (chat + embeddings) + OpenAI response mapping
+   ├─ schemas.py            # Pydantic request models (ChatCompletionRequest, EmbeddingRequest; extra=allow)
+   ├─ db.py                 # SQLAlchemy async engine + trace/cache_hits tables + DB URL redaction
+   ├─ retry.py              # Retry config, Retry-After parsing, Gemini retry-hint parsing, backoff delay
+   ├─ ratelimit.py          # Client-side rate limiter (sliding window, RPM + TPM, per-model limits, stale eviction)
+   ├─ tracing.py            # Trace persistence, cache-hit logging, provider/model-scoped idempotency + response-cache lookup
+   ├─ validation.py         # Concurrent provider key validation + disk caching
+   └─ models.py             # Concurrent per-provider model listing, models.dev enrichment + disk caching
+├─ web/                          # Next.js trace viewer frontend (App Router, TypeScript, Tailwind)
+│  ├─ package.json               # Frontend deps (next, react, tailwindcss, pg)
+│  ├─ next.config.ts             # Next.js config
+│  ├─ src/lib/
+│  │  ├─ db.ts                   # Shared Postgres pool (pg.Pool, DATABASE_URL)
+│  │  ├─ api.ts                  # Client-side fetch wrappers for API routes
+│  │  ├─ types.ts                # TypeScript interfaces (traces, stats, cache hits)
+│  │  ├─ utils.ts                # Formatting helpers (latency, tokens, dates)
+│  │  └─ constants.ts            # Time ranges, provider colors
+│  ├─ src/app/
+│  │  ├─ page.tsx                # Dashboard: summary cards, bar charts, stats table, token usage, cache hit rates
+│  │  ├─ traces/page.tsx         # Traces: split-pane list + detail, filters, hide-embeddings toggle
+│  │  ├─ traces/[id]/page.tsx    # Standalone trace detail (metadata + request/response JSON)
+│  │  ├─ cache-hits/page.tsx     # Cache hits: split-pane list + detail, filters
+│  │  └─ api/traces/             # Next.js API routes (query Postgres directly)
+│  │     ├─ route.ts             # GET /api/traces — paginated trace list
+│  │     ├─ [id]/route.ts        # GET /api/traces/:id — single trace with JSON bodies
+│  │     ├─ stats/route.ts       # GET /api/traces/stats — aggregate stats + tok_think
+│  │     ├─ providers/route.ts   # GET /api/traces/providers — distinct provider/model list
+│  │     ├─ cache-hits/route.ts  # GET /api/traces/cache-hits — paginated cache hits
+│  │     └─ cache-hits/stats/route.ts  # GET /api/traces/cache-hits/stats — cache hit rates
+│  └─ src/components/
+│     ├─ Nav.tsx                 # Sidebar navigation
+│     ├─ JsonTree.tsx            # Recursive collapsible JSON viewer (expandAll support)
+│     ├─ BarChart.tsx            # Pure SVG bar chart (formatValue support)
+│     ├─ StatsTable.tsx          # Provider/model stats table (tok_think column)
+│     ├─ TraceTable.tsx          # Trace list table (row selection)
+│     ├─ TraceDetailPanel.tsx    # Inline trace detail for split-pane view
+│     ├─ TraceFilters.tsx        # Provider/model/status/time filters + hide-embeddings
+│     ├─ CacheHitTable.tsx       # Cache hit list table (row selection)
+│     ├─ CacheHitDetailPanel.tsx # Inline cache hit detail for split-pane view
+│     ├─ Pagination.tsx          # Prev/Next pagination
+│     ├─ TimeRangeSelect.tsx     # 1h/6h/24h/7d/30d/All time range buttons
+│     ├─ ProviderBadge.tsx       # Colored provider label
+│     └─ StatusBadge.tsx         # Colored HTTP status badge
 ```
 
 ## Web frontend

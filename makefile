@@ -128,12 +128,12 @@ stats-postgres:
 		ROUND(AVG(latency_ms)::numeric, 0) AS avg_ms, \
 		SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END) AS ok, \
 		SUM(CASE WHEN status_code IS NULL OR status_code >= 400 THEN 1 ELSE 0 END) AS errors, \
-		COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,prompt_tokens}')::bigint), 0) AS tok_in, \
-		COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,completion_tokens}')::bigint), 0) AS tok_out, \
-		COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,total_tokens}')::bigint), 0) AS tok_total, \
-		COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,total_tokens}')::bigint), 0) \
-		- COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,prompt_tokens}')::bigint), 0) \
-		- COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,completion_tokens}')::bigint), 0) AS tok_think, \
+		COALESCE(SUM((response_json::jsonb #>> '{usage,prompt_tokens}')::bigint), 0) AS tok_in, \
+		COALESCE(SUM((response_json::jsonb #>> '{usage,completion_tokens}')::bigint), 0) AS tok_out, \
+		COALESCE(SUM((response_json::jsonb #>> '{usage,total_tokens}')::bigint), 0) AS tok_total, \
+		COALESCE(SUM((response_json::jsonb #>> '{usage,total_tokens}')::bigint), 0) \
+		- COALESCE(SUM((response_json::jsonb #>> '{usage,prompt_tokens}')::bigint), 0) \
+		- COALESCE(SUM((response_json::jsonb #>> '{usage,completion_tokens}')::bigint), 0) AS tok_think, \
 		0 AS _sort \
 		FROM traces GROUP BY provider, model \
 		UNION ALL \
@@ -141,12 +141,12 @@ stats-postgres:
 		ROUND(AVG(latency_ms)::numeric, 0), \
 		SUM(CASE WHEN status_code >= 200 AND status_code < 300 THEN 1 ELSE 0 END), \
 		SUM(CASE WHEN status_code IS NULL OR status_code >= 400 THEN 1 ELSE 0 END), \
-		COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,prompt_tokens}')::bigint), 0), \
-		COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,completion_tokens}')::bigint), 0), \
-		COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,total_tokens}')::bigint), 0), \
-		COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,total_tokens}')::bigint), 0) \
-		- COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,prompt_tokens}')::bigint), 0) \
-		- COALESCE(SUM((replace(response_json, '\u0000', '')::jsonb #>> '{usage,completion_tokens}')::bigint), 0), \
+		COALESCE(SUM((response_json::jsonb #>> '{usage,prompt_tokens}')::bigint), 0), \
+		COALESCE(SUM((response_json::jsonb #>> '{usage,completion_tokens}')::bigint), 0), \
+		COALESCE(SUM((response_json::jsonb #>> '{usage,total_tokens}')::bigint), 0), \
+		COALESCE(SUM((response_json::jsonb #>> '{usage,total_tokens}')::bigint), 0) \
+		- COALESCE(SUM((response_json::jsonb #>> '{usage,prompt_tokens}')::bigint), 0) \
+		- COALESCE(SUM((response_json::jsonb #>> '{usage,completion_tokens}')::bigint), 0), \
 		1 FROM traces) AS summary ORDER BY _sort, traces DESC;"
 	@echo ""
 	@echo "=== Cache hits ==="
