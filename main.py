@@ -3,7 +3,7 @@ import ipaddress
 import os
 import re
 import sys
-from urllib.parse import urlsplit
+from yarl import URL
 
 import uvicorn
 
@@ -96,7 +96,7 @@ def _is_valid_hostname(hostname: str) -> bool:
 
 
 def _validate_db_url_hostname(db_url: str) -> str | None:
-    hostname = urlsplit(db_url).hostname
+    hostname = URL(db_url).host
     if not hostname:
         return "LLM_PROXY_DB_URL must include a hostname"
     if not _is_valid_hostname(hostname):
@@ -151,9 +151,7 @@ def _run_alt_postgres_preflight() -> int:
     print("Missing provider API keys:")
     for name in missing_api_keys:
         print(f"- {name}")
-    print(
-        "Non-interactive run cannot prompt. Set the missing keys or run interactively."
-    )
+    print("Non-interactive run cannot prompt. Set the missing keys or run interactively.")
     return 1
 
 

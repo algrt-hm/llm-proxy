@@ -56,7 +56,6 @@ Inbound authentication is not implemented; this is intended for internal use.
 | `LLM_PROXY_DB_URL` | `sqlite+aiosqlite:///./llmproxy.db` | SQLAlchemy database URL (SQLite 3.35+ and Postgres supported, e.g. `postgresql+asyncpg://user:pass@localhost/llmproxy`) |
 | `LLM_PROXY_MAX_RETRIES` | `2` | Max retry attempts on transient upstream errors (429, 502, 503, 504) |
 | `LLM_PROXY_RETRY_BASE_DELAY_S` | `1.0` | Base backoff delay (seconds); baseline delay is `base * 2^attempt` (capped at 30s inside shared retry helper) |
-| `LLM_PROXY_VALIDATION_CACHE` | `./llmproxy_validation.json` | Path to cached provider validation results (re-validates after 24h) |
 | `LLM_PROXY_MODELS_CACHE` | `./llmproxy_models.json` | Path to cached model lists (re-fetches after 24h) |
 | `LLM_PROXY_DATABASE_URL` | — | Postgres connection string used by the web frontend and `make run-alt-postgres`/`make stats-postgres` (plain `postgresql://`, e.g. `postgresql://postgres@myhost/llm-proxy`) |
 
@@ -98,7 +97,7 @@ Full tracing is recorded to the database. Database interaction uses SQLAlchemy s
 - `make ping-providers-all` (same, with cheap default models)
 - Ping targets use `LLM_PROXY_BASE_URL=http://localhost:6969` and the ping script normalizes local base URLs to port `6969`.
 - `make validate-keys` (direct upstream key validation; free/read-only endpoints)
-- On server startup, llm-proxy runs the same free/read-only key validation logic as `make validate-keys` and serves cached results from `LLM_PROXY_VALIDATION_CACHE` when fresh (< 24h).
+- On server startup, llm-proxy runs the same free/read-only key validation logic as `make validate-keys` and caches results in-memory for the lifetime of the process.
 
 ## Web frontend
 

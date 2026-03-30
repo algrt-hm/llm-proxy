@@ -1,4 +1,6 @@
 .playwright-mcp/
+.pytest_cache/
+.ruff_cache/
 .idea
 openapi.json
 uv.lock
@@ -19,7 +21,6 @@ wheels/
 # Local data
 *.db
 .env
-llmproxy_validation.json
 llmproxy_models.json
 
 # Next.js frontend

@@ -7,6 +7,17 @@ from .db import CacheHit, SessionLocal, Trace
 
 
 def _to_json(value: object | None) -> str | None:
+    """Object to JSON
+
+    Note this does belong here rather than in utility.py as it's run here
+
+    Args:
+        value (object | None): object to JSONify
+
+    Returns:
+        str | None: None if the input is None, otherwise a JSON string representation of the input
+    """
+
     if value is None:
         return None
     try:
@@ -15,16 +26,27 @@ def _to_json(value: object | None) -> str | None:
         return json.dumps(str(value), ensure_ascii=True, separators=(",", ":"))
 
 
-def _build_cache_key(
-    *, provider: str, model: str, request_payload: object | None
-) -> str | None:
+def _build_cache_key(*, provider: str, model: str, request_payload: object | None) -> str | None:
+    """Cache key from the provider, model, and request payload
+
+    Args:
+        provider (str): model provider
+        model (str): model name
+        request_payload (object | None): API request payload
+
+    Returns:
+        str | None: returns None if request_payload is None, otherwise a SHA256 hash of the JSON
+    """
+
     if request_payload is None:
         return None
+
     payload = {
         "provider": provider,
         "model": model,
         "request": request_payload,
     }
+
     encoded = json.dumps(
         payload,
         ensure_ascii=True,
@@ -32,6 +54,7 @@ def _build_cache_key(
         sort_keys=True,
         default=str,
     ).encode("utf-8")
+
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -41,17 +64,34 @@ async def record_trace(
     provider: str,
     model: str,
     status_code: int | None,
-    latency_ms: float | None,
+    latency_ms: int | None,
     request_payload: object | None,
     response_payload: object | None,
     error: str | None = None,
     idempotency_key: str | None = None,
 ) -> None:
+    """Record a trace of the API request and response
+
+    Args:
+        request_id (str): _description_
+        provider (str): model provider
+        model (str): model name
+        status_code (int | None): HTTP status code of the response
+        latency_ms (float | None): _description_
+        request_payload (object | None): _description_
+        response_payload (object | None): _description_
+        error (str | None, optional): _description_. Defaults to None.
+        idempotency_key (str | None, optional): _description_. Defaults to None.
+    """
+
+    # Generate key
     cache_key = _build_cache_key(
         provider=provider,
         model=model,
         request_payload=request_payload,
     )
+
+    # Generate trace
     trace = Trace(
         request_id=request_id,
         provider=provider,
@@ -65,6 +105,7 @@ async def record_trace(
         cache_key=cache_key,
     )
 
+    # Store trace
     async with SessionLocal() as session:
         session.add(trace)
         await session.commit()
@@ -109,9 +150,7 @@ async def lookup_idempotency(key: str, *, provider: str, model: str) -> Trace | 
         return result.scalar_one_or_none()
 
 
-async def lookup_response_cache(
-    *, provider: str, model: str, request_payload: object
-) -> Trace | None:
+async def lookup_response_cache(*, provider: str, model: str, request_payload: object) -> Trace | None:
     cache_key = _build_cache_key(
         provider=provider,
         model=model,
@@ -151,10 +190,7 @@ async def lookup_response_cache(
         # Reject degenerate chat completions with null/empty content.
         if isinstance(payload, dict) and "choices" in payload:
             choices = payload.get("choices") or []
-            if choices and all(
-                (c.get("message") or {}).get("content") in (None, "")
-                for c in choices
-            ):
+            if choices and all((c.get("message") or {}).get("content") in (None, "") for c in choices):
                 return None
 
         return trace

@@ -1,5 +1,6 @@
-from dataclasses import dataclass
 from os import getenv
+
+from pydantic import BaseModel, ConfigDict
 
 PROVIDERS = (
     "openai",
@@ -20,8 +21,9 @@ DEFAULT_BASE_URLS: dict[str, str] = {
 }
 
 
-@dataclass(frozen=True)
-class ProviderConfig:
+class ProviderConfig(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
     name: str
     api_key: str | None
     base_url: str | None

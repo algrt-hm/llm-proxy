@@ -64,9 +64,7 @@ async def _run() -> int:
 
             config = get_provider_config(provider)
             if not config.api_key:
-                print(
-                    f"[SKIP] {provider}: no configured API key after provider config lookup"
-                )
+                print(f"[SKIP] {provider}: no configured API key after provider config lookup")
                 skipped += 1
                 continue
 
@@ -78,9 +76,7 @@ async def _run() -> int:
                 print(f"[FAIL] {provider}: {result.detail}")
                 failures += 1
 
-    print(
-        f"\nSummary: {len(providers) - skipped - failures} ok, {skipped} skipped, {failures} failed"
-    )
+    print(f"\nSummary: {len(providers) - skipped - failures} ok, {skipped} skipped, {failures} failed")
     return 1 if failures else 0
 
 

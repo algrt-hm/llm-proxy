@@ -17,13 +17,8 @@ async def _receive() -> dict:
     return {"type": "http.request", "body": b"", "more_body": False}
 
 
-def _build_request(
-    headers: dict[str, str] | None = None, path: str = "/v1/chat/completions"
-) -> Request:
-    raw_headers = [
-        (key.lower().encode("utf-8"), value.encode("utf-8"))
-        for key, value in (headers or {}).items()
-    ]
+def _build_request(headers: dict[str, str] | None = None, path: str = "/v1/chat/completions") -> Request:
+    raw_headers = [(key.lower().encode("utf-8"), value.encode("utf-8")) for key, value in (headers or {}).items()]
     app = SimpleNamespace(state=SimpleNamespace(http_client=None))
     scope = {
         "type": "http",
@@ -48,9 +43,7 @@ async def test_default_cache_hit_returns_cached_response(monkeypatch):
 
     captured: dict[str, object] = {}
 
-    async def fake_lookup_response_cache(
-        *, provider: str, model: str, request_payload: object
-    ):
+    async def fake_lookup_response_cache(*, provider: str, model: str, request_payload: object):
         captured["provider"] = provider
         captured["model"] = model
         captured["request_payload"] = request_payload
@@ -96,9 +89,7 @@ async def test_cache_false_disables_lookup(monkeypatch):
         return None
 
     async def fake_lookup_response_cache(**kwargs):  # noqa: ARG001
-        raise AssertionError(
-            "lookup_response_cache should not be called when cache=false"
-        )
+        raise AssertionError("lookup_response_cache should not be called when cache=false")
 
     def fake_get_provider_config(name: str) -> ProviderConfig:
         return ProviderConfig(
@@ -135,9 +126,7 @@ async def test_invalid_cache_value_returns_400_and_records_trace(monkeypatch):
         return None
 
     async def fake_lookup_response_cache(**kwargs):  # noqa: ARG001
-        raise AssertionError(
-            "lookup_response_cache should not be called for invalid cache"
-        )
+        raise AssertionError("lookup_response_cache should not be called for invalid cache")
 
     monkeypatch.setattr(app_module, "record_trace", fake_record_trace)
     monkeypatch.setattr(app_module, "lookup_response_cache", fake_lookup_response_cache)
@@ -210,9 +199,7 @@ async def test_idempotency_rejects_chat_response_on_embeddings_endpoint(monkeypa
             id=99,
             request_id="chat-req-id",
             status_code=200,
-            response_json=json.dumps(
-                {"id": "chatcmpl-abc", "object": "chat.completion"}
-            ),
+            response_json=json.dumps({"id": "chatcmpl-abc", "object": "chat.completion"}),
         )
 
     def fake_get_provider_config(name: str) -> ProviderConfig:
@@ -234,9 +221,7 @@ async def test_idempotency_rejects_chat_response_on_embeddings_endpoint(monkeypa
     monkeypatch.setattr(app_module, "get_provider_config", fake_get_provider_config)
 
     payload = EmbeddingRequest(model="openai/text-embedding-3-small", input="hello")
-    req = _build_request(
-        headers={"idempotency-key": "shared-key"}, path="/v1/embeddings"
-    )
+    req = _build_request(headers={"idempotency-key": "shared-key"}, path="/v1/embeddings")
     response = await app_module.embeddings(req, payload)
     body = json.loads(response.body)
 
@@ -347,9 +332,7 @@ async def test_response_cache_rejects_chat_on_embeddings_endpoint(monkeypatch):
             id=78,
             request_id="chat-cached-id",
             status_code=200,
-            response_json=json.dumps(
-                {"id": "chatcmpl-xyz", "object": "chat.completion"}
-            ),
+            response_json=json.dumps({"id": "chatcmpl-xyz", "object": "chat.completion"}),
         )
 
     def fake_get_provider_config(name: str) -> ProviderConfig:
@@ -422,7 +405,11 @@ VALID_CHAT_RESPONSE = {
     "id": "test-1",
     "object": "chat.completion",
     "choices": [
-        {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Hello"}}
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": "Hello"},
+        }
     ],
     "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 }
@@ -431,7 +418,11 @@ NULL_CONTENT_RESPONSE = {
     "id": "test-2",
     "object": "chat.completion",
     "choices": [
-        {"index": 0, "finish_reason": None, "message": {"role": "assistant", "content": None}}
+        {
+            "index": 0,
+            "finish_reason": None,
+            "message": {"role": "assistant", "content": None},
+        }
     ],
     "usage": {"prompt_tokens": 100, "completion_tokens": 0, "total_tokens": 100},
 }
@@ -440,7 +431,11 @@ EMPTY_CONTENT_RESPONSE = {
     "id": "test-3",
     "object": "chat.completion",
     "choices": [
-        {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": ""}}
+        {
+            "index": 0,
+            "finish_reason": "stop",
+            "message": {"role": "assistant", "content": ""},
+        }
     ],
     "usage": {"prompt_tokens": 100, "completion_tokens": 0, "total_tokens": 100},
 }
@@ -464,7 +459,7 @@ async def _seed_trace(session_factory, *, response, provider="openrouter", model
         provider=provider,
         model=model,
         status_code=200,
-        latency_ms=100.0,
+        latency_ms=100,
         request_json=json.dumps(req_payload),
         response_json=json.dumps(response),
         cache_key=cache_key,
@@ -480,9 +475,7 @@ async def test_cache_rejects_null_content_response(monkeypatch):
     """A cached chat response with content=null must not be served."""
     sf = await _setup_cache_db(monkeypatch)
     req_payload = await _seed_trace(sf, response=NULL_CONTENT_RESPONSE)
-    result = await lookup_response_cache(
-        provider="openrouter", model="test-model", request_payload=req_payload
-    )
+    result = await lookup_response_cache(provider="openrouter", model="test-model", request_payload=req_payload)
     assert result is None
 
 
@@ -491,9 +484,7 @@ async def test_cache_rejects_empty_content_response(monkeypatch):
     """A cached chat response with content='' must not be served."""
     sf = await _setup_cache_db(monkeypatch)
     req_payload = await _seed_trace(sf, response=EMPTY_CONTENT_RESPONSE)
-    result = await lookup_response_cache(
-        provider="openrouter", model="test-model", request_payload=req_payload
-    )
+    result = await lookup_response_cache(provider="openrouter", model="test-model", request_payload=req_payload)
     assert result is None
 
 
@@ -502,9 +493,7 @@ async def test_cache_serves_valid_content_response(monkeypatch):
     """A cached chat response with actual content should be served."""
     sf = await _setup_cache_db(monkeypatch)
     req_payload = await _seed_trace(sf, response=VALID_CHAT_RESPONSE)
-    result = await lookup_response_cache(
-        provider="openrouter", model="test-model", request_payload=req_payload
-    )
+    result = await lookup_response_cache(provider="openrouter", model="test-model", request_payload=req_payload)
     assert result is not None
     body = json.loads(result.response_json)
     assert body["choices"][0]["message"]["content"] == "Hello"

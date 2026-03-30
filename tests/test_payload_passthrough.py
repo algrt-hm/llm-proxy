@@ -49,27 +49,19 @@ def test_extra_fields_preserved():
 
 def test_build_embeddings_url_plain_base():
     """Base URL without suffix gets /embeddings appended."""
-    assert build_embeddings_url("https://api.openai.com/v1") == (
-        "https://api.openai.com/v1/embeddings"
-    )
+    assert build_embeddings_url("https://api.openai.com/v1") == ("https://api.openai.com/v1/embeddings")
 
 
 def test_build_embeddings_url_already_has_embeddings():
     """Base URL ending in /embeddings is returned as-is."""
-    assert build_embeddings_url("https://api.openai.com/v1/embeddings") == (
-        "https://api.openai.com/v1/embeddings"
-    )
+    assert build_embeddings_url("https://api.openai.com/v1/embeddings") == ("https://api.openai.com/v1/embeddings")
 
 
 def test_build_embeddings_url_strips_chat_completions():
     """Base URL ending in /chat/completions has that suffix replaced."""
-    assert build_embeddings_url("https://api.openai.com/v1/chat/completions") == (
-        "https://api.openai.com/v1/embeddings"
-    )
+    assert build_embeddings_url("https://api.openai.com/v1/chat/completions") == ("https://api.openai.com/v1/embeddings")
 
 
 def test_build_embeddings_url_trailing_slash():
     """Trailing slashes are stripped before processing."""
-    assert build_embeddings_url("https://api.openai.com/v1/") == (
-        "https://api.openai.com/v1/embeddings"
-    )
+    assert build_embeddings_url("https://api.openai.com/v1/") == ("https://api.openai.com/v1/embeddings")

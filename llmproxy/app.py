@@ -20,13 +20,15 @@ from .db import (
 from .gemini import (
     build_gemini_config,
     build_gemini_contents,
+    generate_gemini_embedding,
+    generate_gemini_response,
+    stream_gemini_response,
+)
+from .openai import (
     build_openai_done_chunk,
     build_openai_embedding_response,
     build_openai_response,
     build_openai_stream_chunk,
-    generate_gemini_embedding,
-    generate_gemini_response,
-    stream_gemini_response,
     usage_to_openai,
 )
 from .models import get_or_fetch_models
@@ -52,6 +54,7 @@ from .tracing import (
     record_cache_hit,
     record_trace,
 )
+from .utility import log_validation_results
 from .validation import ProviderStatus, get_or_validate
 
 TIMEOUT_S = float(getenv("LLM_PROXY_TIMEOUT_S", "300"))
@@ -62,28 +65,6 @@ gemini_rate_limiter = GeminiRateLimiter()
 openai_rate_limiter = OpenAIRateLimiter()
 
 
-def _log_validation_results(results: dict[str, ProviderStatus]) -> None:
-    valid = [n for n, s in results.items() if s.ok]
-    invalid = [
-        n
-        for n, s in results.items()
-        if not s.ok and s.detail != "no API key configured"
-    ]
-    unconfigured = [
-        n for n, s in results.items() if s.detail == "no API key configured"
-    ]
-
-    if valid:
-        LOGGER.info("Valid providers: %s", ", ".join(valid))
-    if invalid:
-        for name in invalid:
-            LOGGER.warning("Invalid provider %s: %s", name, results[name].detail)
-    if unconfigured:
-        LOGGER.info("Unconfigured providers: %s", ", ".join(unconfigured))
-    if not valid and not invalid:
-        LOGGER.warning("No provider API keys configured.")
-
-
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print(f"LLM_PROXY_DB_URL={redact_db_url(DB_URL)}")
@@ -91,7 +72,7 @@ async def lifespan(app: FastAPI):
     await init_db()
     provider_status = await get_or_validate()
     app.state.provider_status = provider_status
-    _log_validation_results(provider_status)
+    log_validation_results(provider_status)
     provider_models = await get_or_fetch_models()
     app.state.provider_models = provider_models
     async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
@@ -110,11 +91,7 @@ async def health() -> dict[str, str]:
 @app.get("/status")
 async def provider_status(request: Request) -> dict:
     results: dict[str, ProviderStatus] = request.app.state.provider_status
-    return {
-        "providers": {
-            name: {"ok": s.ok, "detail": s.detail} for name, s in results.items()
-        }
-    }
+    return {"providers": {name: {"ok": s.ok, "detail": s.detail} for name, s in results.items()}}
 
 
 def _filter_by_created(models: list[dict], after: str | None) -> list[dict]:
@@ -124,9 +101,7 @@ def _filter_by_created(models: list[dict], after: str | None) -> list[dict]:
 
 
 @app.get("/v1/models/{provider}")
-async def list_models(
-    provider: str, request: Request, after: str | None = None
-) -> JSONResponse:
+async def list_models(provider: str, request: Request, after: str | None = None) -> JSONResponse:
     provider = provider.lower()
     if provider not in PROVIDERS:
         return JSONResponse(
@@ -149,9 +124,7 @@ async def list_all_models(request: Request, after: str | None = None) -> JSONRes
     return JSONResponse(content={"object": "list", "data": data})
 
 
-def _filter_response_headers(
-    headers: httpx.Headers, *, include_content_encoding: bool = True
-) -> dict[str, str]:
+def _filter_response_headers(headers: httpx.Headers, *, include_content_encoding: bool = True) -> dict[str, str]:
     excluded = {
         "connection",
         "keep-alive",
@@ -208,10 +181,7 @@ def _is_cache_enabled(value: Any) -> bool:
             return False
     if isinstance(value, int) and value in {0, 1}:
         return bool(value)
-    raise ValueError(
-        "Invalid 'cache' value. Expected boolean true/false "
-        "(also accepts 1/0 or true/false strings)."
-    )
+    raise ValueError("Invalid 'cache' value. Expected boolean true/false (also accepts 1/0 or true/false strings).")
 
 
 async def _handle_gemini_request(
@@ -225,9 +195,7 @@ async def _handle_gemini_request(
     stream: bool,
     idempotency_key: str | None = None,
 ) -> JSONResponse | StreamingResponse:
-    system_instruction, contents = build_gemini_contents(
-        incoming_payload.get("messages", [])
-    )
+    system_instruction, contents = build_gemini_contents(incoming_payload.get("messages", []))
     if not contents:
         message = "Gemini requests must include at least one non-system message."
         await record_trace(
@@ -235,7 +203,7 @@ async def _handle_gemini_request(
             provider="gemini",
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
             error=message,
@@ -277,19 +245,17 @@ async def _handle_gemini_request(
                             finish_reason=None,
                             created=created,
                         )
-                    usage_metadata = (
-                        getattr(chunk, "usage_metadata", None) or usage_metadata
-                    )
-            except Exception as exc:  # noqa: BLE001
+                    usage_metadata = getattr(chunk, "usage_metadata", None) or usage_metadata
+            except Exception as exception:  # noqa: BLE001
                 await record_trace(
                     request_id=request_id,
                     provider="gemini",
                     model=upstream_model,
                     status_code=None,
-                    latency_ms=(time.perf_counter() - started) * 1000,
+                    latency_ms=round((time.perf_counter() - started) * 1000),
                     request_payload=trace_payload,
                     response_payload=None,
-                    error=str(exc),
+                    error=str(exception),
                     idempotency_key=idempotency_key,
                 )
                 raise
@@ -309,7 +275,7 @@ async def _handle_gemini_request(
                 provider="gemini",
                 model=upstream_model,
                 status_code=status.HTTP_200_OK,
-                latency_ms=(time.perf_counter() - started) * 1000,
+                latency_ms=round((time.perf_counter() - started) * 1000),
                 request_payload=trace_payload,
                 response_payload=response_payload,
                 idempotency_key=idempotency_key,
@@ -346,11 +312,11 @@ async def _handle_gemini_request(
             )
             last_exc = None
             break
-        except Exception as exc:  # noqa: BLE001
-            last_exc = exc
+        except Exception as exception:  # noqa: BLE001
+            last_exc = exception
             if attempt < MAX_RETRIES:
                 delay = compute_delay(attempt, None)
-                retry_after = parse_gemini_retry_after(exc)
+                retry_after = parse_gemini_retry_after(exception)
                 if retry_after is not None:
                     delay = max(delay, retry_after)
                 LOGGER.warning(
@@ -359,7 +325,7 @@ async def _handle_gemini_request(
                     MAX_RETRIES,
                     upstream_model,
                     delay,
-                    exc,
+                    exception,
                 )
                 await asyncio.sleep(delay)
 
@@ -369,7 +335,7 @@ async def _handle_gemini_request(
             provider="gemini",
             model=upstream_model,
             status_code=None,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
             error=str(last_exc),
@@ -396,7 +362,7 @@ async def _handle_gemini_request(
         provider="gemini",
         model=upstream_model,
         status_code=status.HTTP_200_OK,
-        latency_ms=(time.perf_counter() - started) * 1000,
+        latency_ms=round((time.perf_counter() - started) * 1000),
         request_payload=trace_payload,
         response_payload=response_payload,
         idempotency_key=idempotency_key,
@@ -426,8 +392,8 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
     cache_value = incoming_payload.get("cache", True)
     try:
         cache_enabled = _is_cache_enabled(cache_value)
-    except ValueError as exc:
-        message = str(exc)
+    except ValueError as exception:
+        message = str(exception)
         error_trace_payload = {
             **incoming_payload,
             "model": upstream_model,
@@ -438,7 +404,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             provider=provider,
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=error_trace_payload,
             response_payload=None,
             error=message,
@@ -451,9 +417,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
 
     # --- Idempotency check (non-streaming only) ---
     if idempotency_key and not stream:
-        cached = await lookup_idempotency(
-            idempotency_key, provider=provider, model=upstream_model
-        )
+        cached = await lookup_idempotency(idempotency_key, provider=provider, model=upstream_model)
         if cached and cached.response_json:
             try:
                 cached_payload = json.loads(cached.response_json)
@@ -461,11 +425,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                 cached_payload = None
             # Only serve cache for non-streaming traces (proper JSON, not {"raw": ...}).
             # Skip if cached response is from a different endpoint (e.g. embedding).
-            if (
-                cached_payload is not None
-                and "raw" not in cached_payload
-                and cached_payload.get("object") != "list"
-            ):
+            if cached_payload is not None and "raw" not in cached_payload and cached_payload.get("object") != "list":
                 await record_cache_hit(
                     provider=provider,
                     model=upstream_model,
@@ -489,7 +449,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             provider=provider,
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
             error=message,
@@ -509,11 +469,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             except json.JSONDecodeError:
                 cached_payload = None
             # Skip if cached response is from a different endpoint (e.g. embedding).
-            if (
-                cached_payload is not None
-                and "raw" not in cached_payload
-                and cached_payload.get("object") != "list"
-            ):
+            if cached_payload is not None and "raw" not in cached_payload and cached_payload.get("object") != "list":
                 await record_cache_hit(
                     provider=provider,
                     model=upstream_model,
@@ -538,7 +494,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             provider=provider,
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
             error=message,
@@ -555,7 +511,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             provider=provider,
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
             error=message,
@@ -620,7 +576,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                     provider=provider,
                     model=upstream_model,
                     status_code=None,
-                    latency_ms=(time.perf_counter() - started) * 1000,
+                    latency_ms=round((time.perf_counter() - started) * 1000),
                     request_payload=outgoing_payload,
                     response_payload=None,
                     error="Upstream request timed out",
@@ -631,7 +587,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                     "Upstream request timed out",
                     request_id,
                 )
-            except httpx.HTTPError as exc:
+            except httpx.HTTPError as exception:
                 if attempt < MAX_RETRIES:
                     delay = compute_delay(attempt, None)
                     LOGGER.warning(
@@ -641,7 +597,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                         provider,
                         upstream_model,
                         delay,
-                        exc,
+                        exception,
                     )
                     await asyncio.sleep(delay)
                     continue
@@ -650,10 +606,10 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                     provider=provider,
                     model=upstream_model,
                     status_code=None,
-                    latency_ms=(time.perf_counter() - started) * 1000,
+                    latency_ms=round((time.perf_counter() - started) * 1000),
                     request_payload=outgoing_payload,
                     response_payload=None,
-                    error=str(exc),
+                    error=str(exception),
                     idempotency_key=idempotency_key,
                 )
                 return _error_response(
@@ -695,7 +651,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                     provider=provider,
                     model=upstream_model,
                     status_code=response.status_code,
-                    latency_ms=(time.perf_counter() - started) * 1000,
+                    latency_ms=round((time.perf_counter() - started) * 1000),
                     request_payload=outgoing_payload,
                     response_payload={"raw": raw},
                     idempotency_key=idempotency_key,
@@ -726,8 +682,8 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                 json=outgoing_payload,
             )
             last_exc = None
-        except httpx.TimeoutException as exc:
-            last_exc = exc
+        except httpx.TimeoutException as exception:
+            last_exc = exception
             if attempt < MAX_RETRIES:
                 delay = compute_delay(attempt, None)
                 LOGGER.warning(
@@ -741,8 +697,8 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                 await asyncio.sleep(delay)
                 continue
             break
-        except httpx.HTTPError as exc:
-            last_exc = exc
+        except httpx.HTTPError as exception:
+            last_exc = exception
             if attempt < MAX_RETRIES:
                 delay = compute_delay(attempt, None)
                 LOGGER.warning(
@@ -752,7 +708,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                     provider,
                     upstream_model,
                     delay,
-                    exc,
+                    exception,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -775,7 +731,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
         break
 
     if last_exc is not None:
-        latency_ms = (time.perf_counter() - started) * 1000
+        latency_ms = round((time.perf_counter() - started) * 1000)
         await record_trace(
             request_id=request_id,
             provider=provider,
@@ -799,7 +755,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             request_id,
         )
 
-    latency_ms = (time.perf_counter() - started) * 1000
+    latency_ms = round((time.perf_counter() - started) * 1000)
 
     response_payload: Any
     content_type = response.headers.get("content-type", "")
@@ -830,9 +786,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
         idempotency_key=idempotency_key,
     )
 
-    resp_headers = _filter_response_headers(
-        response.headers, include_content_encoding=False
-    )
+    resp_headers = _filter_response_headers(response.headers, include_content_encoding=False)
     resp_headers["x-request-id"] = request_id
     # Forward Retry-After on final failure with retryable status.
     if response.status_code in RETRYABLE_STATUSES and last_retry_after:
@@ -861,15 +815,15 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
     cache_value = incoming_payload.get("cache", True)
     try:
         cache_enabled = _is_cache_enabled(cache_value)
-    except ValueError as exc:
-        message = str(exc)
+    except ValueError as exception:
+        message = str(exception)
         error_trace_payload = {**incoming_payload, "model": upstream_model}
         await record_trace(
             request_id=request_id,
             provider=provider,
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=error_trace_payload,
             response_payload=None,
             error=message,
@@ -882,20 +836,14 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
 
     # --- Idempotency check ---
     if idempotency_key:
-        cached = await lookup_idempotency(
-            idempotency_key, provider=provider, model=upstream_model
-        )
+        cached = await lookup_idempotency(idempotency_key, provider=provider, model=upstream_model)
         if cached and cached.response_json:
             try:
                 cached_payload = json.loads(cached.response_json)
             except json.JSONDecodeError:
                 cached_payload = None
             # Skip if cached response is from a different endpoint (e.g. chat).
-            if (
-                cached_payload is not None
-                and "raw" not in cached_payload
-                and cached_payload.get("object") == "list"
-            ):
+            if cached_payload is not None and "raw" not in cached_payload and cached_payload.get("object") == "list":
                 await record_cache_hit(
                     provider=provider,
                     model=upstream_model,
@@ -919,7 +867,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
             provider=provider,
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
             error=message,
@@ -940,11 +888,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
             except json.JSONDecodeError:
                 cached_payload = None
             # Skip if cached response is from a different endpoint (e.g. chat).
-            if (
-                cached_payload is not None
-                and "raw" not in cached_payload
-                and cached_payload.get("object") == "list"
-            ):
+            if cached_payload is not None and "raw" not in cached_payload and cached_payload.get("object") == "list":
                 await record_cache_hit(
                     provider=provider,
                     model=upstream_model,
@@ -969,7 +913,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
             provider=provider,
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
             error=message,
@@ -986,7 +930,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
             provider=provider,
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
             error=message,
@@ -1005,7 +949,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
             provider=provider,
             model=upstream_model,
             status_code=status.HTTP_400_BAD_REQUEST,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
             error=message,
@@ -1027,11 +971,11 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
                 )
                 last_exc = None
                 break
-            except Exception as exc:  # noqa: BLE001
-                last_exc = exc
+            except Exception as exception:  # noqa: BLE001
+                last_exc = exception
                 if attempt < MAX_RETRIES:
                     delay = compute_delay(attempt, None)
-                    retry_after = parse_gemini_retry_after(exc)
+                    retry_after = parse_gemini_retry_after(exception)
                     if retry_after is not None:
                         delay = max(delay, retry_after)
                     LOGGER.warning(
@@ -1040,7 +984,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
                         MAX_RETRIES,
                         upstream_model,
                         delay,
-                        exc,
+                        exception,
                     )
                     await asyncio.sleep(delay)
 
@@ -1050,7 +994,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
                 provider="gemini",
                 model=upstream_model,
                 status_code=None,
-                latency_ms=(time.perf_counter() - started) * 1000,
+                latency_ms=round((time.perf_counter() - started) * 1000),
                 request_payload=trace_payload,
                 response_payload=None,
                 error=str(last_exc),
@@ -1075,7 +1019,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
             provider="gemini",
             model=upstream_model,
             status_code=status.HTTP_200_OK,
-            latency_ms=(time.perf_counter() - started) * 1000,
+            latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=response_payload,
             idempotency_key=idempotency_key,
@@ -1109,8 +1053,8 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
                 json=outgoing_payload,
             )
             last_exc = None
-        except httpx.TimeoutException as exc:
-            last_exc = exc
+        except httpx.TimeoutException as exception:
+            last_exc = exception
             if attempt < MAX_RETRIES:
                 delay = compute_delay(attempt, None)
                 LOGGER.warning(
@@ -1124,8 +1068,8 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
                 await asyncio.sleep(delay)
                 continue
             break
-        except httpx.HTTPError as exc:
-            last_exc = exc
+        except httpx.HTTPError as exception:
+            last_exc = exception
             if attempt < MAX_RETRIES:
                 delay = compute_delay(attempt, None)
                 LOGGER.warning(
@@ -1135,7 +1079,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
                     provider,
                     upstream_model,
                     delay,
-                    exc,
+                    exception,
                 )
                 await asyncio.sleep(delay)
                 continue
@@ -1158,7 +1102,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
         break
 
     if last_exc is not None:
-        latency_ms = (time.perf_counter() - started) * 1000
+        latency_ms = round((time.perf_counter() - started) * 1000)
         await record_trace(
             request_id=request_id,
             provider=provider,
@@ -1182,7 +1126,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
             request_id,
         )
 
-    latency_ms = (time.perf_counter() - started) * 1000
+    latency_ms = round((time.perf_counter() - started) * 1000)
 
     response_payload: Any
     content_type = response.headers.get("content-type", "")
@@ -1213,9 +1157,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
         idempotency_key=idempotency_key,
     )
 
-    resp_headers = _filter_response_headers(
-        response.headers, include_content_encoding=False
-    )
+    resp_headers = _filter_response_headers(response.headers, include_content_encoding=False)
     resp_headers["x-request-id"] = request_id
     if response.status_code in RETRYABLE_STATUSES and last_retry_after:
         resp_headers["retry-after"] = last_retry_after

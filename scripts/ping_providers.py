@@ -2,7 +2,7 @@
 import json
 import os
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from yarl import URL
 
 import httpx
 
@@ -79,39 +79,17 @@ def _normalize_local_base_url(value: str) -> tuple[str, str | None]:
         raw = f"http://{raw}"
     raw = raw.rstrip("/")
 
-    parsed = urlsplit(raw)
-    host = parsed.hostname
+    parsed = URL(raw)
+    host = parsed.host
     if not host or host not in LOCAL_HOSTS or parsed.port == 6969:
         return raw, None
 
-    userinfo = ""
-    if parsed.username:
-        userinfo = parsed.username
-        if parsed.password:
-            userinfo = f"{userinfo}:{parsed.password}"
-        userinfo = f"{userinfo}@"
-
-    host_part = host
-    if ":" in host_part and not host_part.startswith("["):
-        host_part = f"[{host_part}]"
-
-    corrected_netloc = f"{userinfo}{host_part}:6969"
-    corrected = urlunsplit(
-        (
-            parsed.scheme or "http",
-            corrected_netloc,
-            parsed.path,
-            parsed.query,
-            parsed.fragment,
-        )
-    ).rstrip("/")
+    corrected = str(parsed.with_port(6969)).rstrip("/")
     return corrected, raw
 
 
 def main() -> int:
-    base_url, corrected_from = _normalize_local_base_url(
-        os.getenv("LLM_PROXY_BASE_URL", DEFAULT_BASE_URL)
-    )
+    base_url, corrected_from = _normalize_local_base_url(os.getenv("LLM_PROXY_BASE_URL", DEFAULT_BASE_URL))
     timeout_s = float(os.getenv("LLM_PROXY_TEST_TIMEOUT_S", "60"))
     endpoint = f"{base_url}/v1/chat/completions"
 
@@ -121,10 +99,7 @@ def main() -> int:
 
     with httpx.Client(timeout=timeout_s) as client:
         if corrected_from:
-            print(
-                f"[INFO] corrected LLM_PROXY_BASE_URL port to 6969: "
-                f"{corrected_from} -> {base_url}"
-            )
+            print(f"[INFO] corrected LLM_PROXY_BASE_URL port to 6969: {corrected_from} -> {base_url}")
 
         for provider in providers:
             if provider not in PROVIDERS:
@@ -142,10 +117,7 @@ def main() -> int:
 
             model = _model_for_provider(provider)
             if not model:
-                print(
-                    f"[SKIP] {provider}: missing LLM_PROXY_TEST_MODEL_{provider.upper()} "
-                    "for a provider-specific model name"
-                )
+                print(f"[SKIP] {provider}: missing LLM_PROXY_TEST_MODEL_{provider.upper()} for a provider-specific model name")
                 skipped += 1
                 continue
 
@@ -156,11 +128,8 @@ def main() -> int:
 
             try:
                 response = client.post(endpoint, json=payload)
-            except httpx.HTTPError as exc:
-                print(
-                    f"[FAIL] {provider}: request error: {exc} "
-                    f"({_provider_api_keys_debug(provider)})"
-                )
+            except httpx.HTTPError as exception:
+                print(f"[FAIL] {provider}: request error: {exception} ({_provider_api_keys_debug(provider)})")
                 failures += 1
                 continue
 
@@ -174,18 +143,13 @@ def main() -> int:
 
             if response.status_code >= 400 or _is_error_payload(response_payload):
                 snippet = response_text[:500] if response_text else "<empty>"
-                print(
-                    f"[FAIL] {provider}: {response.status_code} {snippet} "
-                    f"({_provider_api_keys_debug(provider)})"
-                )
+                print(f"[FAIL] {provider}: {response.status_code} {snippet} ({_provider_api_keys_debug(provider)})")
                 failures += 1
                 continue
 
             print(f"[OK] {provider}: {response.status_code}")
 
-    print(
-        f"\nSummary: {len(providers) - skipped - failures} ok, {skipped} skipped, {failures} failed"
-    )
+    print(f"\nSummary: {len(providers) - skipped - failures} ok, {skipped} skipped, {failures} failed")
     return 1 if failures else 0
 
 

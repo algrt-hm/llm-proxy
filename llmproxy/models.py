@@ -132,9 +132,7 @@ async def _fetch_anthropic(
         if after_id:
             req_params["after_id"] = after_id
 
-        response = await client.get(
-            url, headers=headers or None, params=req_params or None
-        )
+        response = await client.get(url, headers=headers or None, params=req_params or None)
         response.raise_for_status()
         body = response.json()
         for item in body.get("data", []):
@@ -172,9 +170,7 @@ async def fetch_models(name: str, client: httpx.AsyncClient) -> ModelList:
         return await _fetch_anthropic(client, config)
 
     if name == "openrouter":
-        return await _fetch_openai_format(
-            client, config, parser=_parse_openrouter_model
-        )
+        return await _fetch_openai_format(client, config, parser=_parse_openrouter_model)
 
     # openai, cerebras — standard OpenAI format
     return await _fetch_openai_format(client, config)
@@ -186,8 +182,8 @@ async def _fetch_models_dev(client: httpx.AsyncClient) -> dict:
         resp = await client.get(MODELS_DEV_URL)
         resp.raise_for_status()
         return resp.json()
-    except Exception as exc:  # noqa: BLE001
-        LOGGER.warning("Failed to fetch models.dev: %s", exc)
+    except Exception as exception:  # noqa: BLE001
+        LOGGER.warning("Failed to fetch models.dev: %s", exception)
         return {}
 
 
@@ -265,8 +261,8 @@ async def fetch_all_models() -> dict[str, ModelList]:
                 models = await fetch_models(name, client)
                 LOGGER.info("Fetched %d models for %s", len(models), name)
                 return name, models
-            except Exception as exc:  # noqa: BLE001
-                LOGGER.warning("Failed to fetch models for %s: %s", name, exc)
+            except Exception as exception:  # noqa: BLE001
+                LOGGER.warning("Failed to fetch models for %s: %s", name, exception)
                 return name, []
 
         # Fetch all providers + models.dev concurrently.
@@ -329,8 +325,8 @@ def save_model_cache(path: Path, results: dict[str, ModelList]) -> None:
     }
     try:
         path.write_text(json.dumps(data, indent=2) + "\n")
-    except OSError as exc:
-        LOGGER.warning("Failed to write model cache: %s", exc)
+    except OSError as exception:
+        LOGGER.warning("Failed to write model cache: %s", exception)
 
 
 async def get_or_fetch_models(path: Path | None = None) -> dict[str, ModelList]:
