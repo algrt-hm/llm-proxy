@@ -3,12 +3,13 @@ import re
 from email.utils import parsedate_to_datetime
 from os import getenv
 
+from .constants import PACKAGE_NAME
+
 RETRYABLE_STATUSES = {429, 502, 503, 504}
 MAX_RETRIES = int(getenv("LLM_PROXY_MAX_RETRIES", "2"))
 RETRY_BASE_DELAY_S = float(getenv("LLM_PROXY_RETRY_BASE_DELAY_S", "1.0"))
 MAX_DELAY_S = 30.0
-
-LOGGER = logging.getLogger("llmproxy")
+LOGGER = logging.getLogger(PACKAGE_NAME)
 
 _GEMINI_RETRY_PATTERNS = (
     # Example: "Please retry in 53.021757137s."

@@ -7,15 +7,15 @@ from sqlalchemy import DateTime, Integer, String, Text, inspect, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from .constants import PACKAGE_NAME
+
 DB_URL = getenv("LLM_PROXY_DB_URL", "sqlite+aiosqlite:///./llmproxy.db")
+LOGGER = logging.getLogger(PACKAGE_NAME)
 
 
 def redact_db_url(url: str) -> str:
     """Redact password from a database URL for safe logging."""
     return re.sub(r"://([^:]+):([^@]+)@", r"://\1:***@", url)
-
-
-LOGGER = logging.getLogger("llmproxy")
 
 
 class Base(DeclarativeBase):

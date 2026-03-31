@@ -4,7 +4,9 @@ from typing import Any
 from google import genai
 from google.genai import types
 
-LOGGER = logging.getLogger("llmproxy")
+from .constants import PACKAGE_NAME
+
+LOGGER = logging.getLogger(PACKAGE_NAME)
 
 
 _ROLE_MAP = {

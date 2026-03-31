@@ -55,10 +55,7 @@ async def _run() -> int:
                 continue
 
             if not _should_test_provider(provider):
-                print(
-                    f"[SKIP] {provider}: missing {provider.upper()}_API_KEY locally "
-                    "(set LLM_PROXY_TEST_FORCE_ALL=1 to test anyway)"
-                )
+                print(f"[SKIP] {provider}: missing {provider.upper()}_API_KEY locally (set LLM_PROXY_TEST_FORCE_ALL=1 to test anyway)")
                 skipped += 1
                 continue
 

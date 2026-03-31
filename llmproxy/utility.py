@@ -1,8 +1,9 @@
 import logging
 
+from .constants import PACKAGE_NAME
 from .validation import ProviderStatus
 
-LOGGER = logging.getLogger("llmproxy")
+LOGGER = logging.getLogger(PACKAGE_NAME)
 
 
 def log_validation_results(results: dict[str, ProviderStatus]) -> None:

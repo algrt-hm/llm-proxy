@@ -10,10 +10,10 @@ import anyio
 import httpx
 from google import genai
 
+from .constants import ANTHROPIC_VERSION, PACKAGE_NAME
 from .providers import PROVIDERS, ProviderConfig, build_auth, get_provider_config
 
-LOGGER = logging.getLogger("llmproxy")
-ANTHROPIC_VERSION = "2023-06-01"
+LOGGER = logging.getLogger(PACKAGE_NAME)
 CACHE_MAX_AGE = timedelta(hours=24)
 DEFAULT_CACHE_PATH = Path("./llmproxy_models.json")
 FETCH_TIMEOUT_S = 30.0

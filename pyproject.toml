@@ -26,4 +26,4 @@ filterwarnings = [
 ]
 
 [tool.ruff]
-line-length = 130
+line-length = 150

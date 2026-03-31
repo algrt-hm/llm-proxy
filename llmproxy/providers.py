@@ -22,6 +22,8 @@ DEFAULT_BASE_URLS: dict[str, str] = {
 
 
 class ProviderConfig(BaseModel):
+    """Various bits of config for the provider, including base URL and API key"""
+
     model_config = ConfigDict(frozen=True)
 
     name: str

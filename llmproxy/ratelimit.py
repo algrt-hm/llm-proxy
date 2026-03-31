@@ -3,7 +3,9 @@ import logging
 import time
 from collections import deque
 
-LOGGER = logging.getLogger("llmproxy")
+from .constants import PACKAGE_NAME
+
+LOGGER = logging.getLogger(PACKAGE_NAME)
 
 RPM = 22  # ~10% below Gemini free-tier limit (25 RPM)
 TPM = 900_000  # ~10% below Gemini free-tier limit (1M TPM)

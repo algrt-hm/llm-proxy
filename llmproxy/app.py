@@ -56,10 +56,11 @@ from .tracing import (
 )
 from .utility import log_validation_results
 from .validation import ProviderStatus, get_or_validate
+from .constants import PACKAGE_NAME
 
 TIMEOUT_S = float(getenv("LLM_PROXY_TIMEOUT_S", "300"))
 MAX_IDEMPOTENCY_KEY_LEN = 256
-LOGGER = logging.getLogger("llmproxy")
+LOGGER = logging.getLogger(PACKAGE_NAME)
 
 gemini_rate_limiter = GeminiRateLimiter()
 openai_rate_limiter = OpenAIRateLimiter()

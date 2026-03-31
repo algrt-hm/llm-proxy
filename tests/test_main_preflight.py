@@ -28,9 +28,7 @@ def test_validate_db_url_hostname_accepts_localhost():
 
 
 def test_validate_db_url_hostname_requires_hostname():
-    assert main._validate_db_url_hostname("postgresql+asyncpg://postgres@/llm-proxy") == (
-        "LLM_PROXY_DB_URL must include a hostname"
-    )
+    assert main._validate_db_url_hostname("postgresql+asyncpg://postgres@/llm-proxy") == ("LLM_PROXY_DB_URL must include a hostname")
 
 
 def test_validate_db_url_hostname_rejects_invalid_hostname():
