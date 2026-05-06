@@ -13,6 +13,7 @@ PROVIDERS = (
     "gemini",
     "cerebras",
     "anthropic",
+    "deepseek",
 )
 BOOL_TRUE = {"1", "true", "yes", "y", "on"}
 LOCAL_HOSTS = {"localhost", "127.0.0.1", "::1"}

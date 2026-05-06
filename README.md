@@ -12,6 +12,7 @@ It detects which of the following API keys are configured:
 - GEMINI_API_KEY (or GOOGLE_API_KEY)
 - CEREBRAS_API_KEY
 - ANTHROPIC_API_KEY
+- DEEPSEEK_API_KEY
 
 and enables the corresponding provider functionality.
 
@@ -20,7 +21,7 @@ llm-proxy implements the OpenAI chat and embeddings APIs
 (see: https://app.stainless.com/api/spec/documented/openai/openapi.documented.yml)
 
 and uses OpenAI-compatible endpoints. You select the model/provider via the `model` field
-(Perplexity, OpenAI, OpenRouter, Google Gemini, Cerebras, Anthropic).
+(Perplexity, OpenAI, OpenRouter, Google Gemini, Cerebras, Anthropic, DeepSeek).
 
 Model selection supports a provider prefix, e.g. `openai:gpt-4o-mini`,
 `openrouter:openai/gpt-4o-mini`, or `openai/gpt-4o-mini`.
@@ -33,6 +34,7 @@ Each provider needs an API key. Base URLs have built-in defaults and can be over
 - GEMINI_API_KEY (or GOOGLE_API_KEY)
 - CEREBRAS_API_KEY / CEREBRAS_BASE_URL
 - ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
+- DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL
 
 Gemini requests are sent via the official `google-genai` Python SDK rather than OpenAI-compatible HTTP calls.
 `GEMINI_BASE_URL` is not used by the SDK path.

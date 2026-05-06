@@ -9,6 +9,7 @@ PROVIDERS = (
     "gemini",
     "cerebras",
     "anthropic",
+    "deepseek",
 )
 DEFAULT_PROVIDER = getenv("LLM_PROXY_DEFAULT_PROVIDER", "openai").strip().lower()
 DEFAULT_BASE_URLS: dict[str, str] = {
@@ -18,6 +19,7 @@ DEFAULT_BASE_URLS: dict[str, str] = {
     "gemini": "https://generativelanguage.googleapis.com/v1beta/openai",
     "cerebras": "https://api.cerebras.ai/v1",
     "anthropic": "https://api.anthropic.com/v1",
+    "deepseek": "https://api.deepseek.com",
 }
 
 
