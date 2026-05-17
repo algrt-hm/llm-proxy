@@ -38,6 +38,8 @@ def _providers_to_test() -> list[str]:
 def _should_test_provider(name: str) -> bool:
     if _bool_env("LLM_PROXY_TEST_FORCE_ALL"):
         return True
+    if name == "gemini":
+        return bool(os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY"))
     return bool(os.getenv(f"{name.upper()}_API_KEY"))
 
 

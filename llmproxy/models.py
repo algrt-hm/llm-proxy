@@ -289,7 +289,7 @@ def load_model_cache(path: Path) -> dict[str, ModelList] | None:
         return None
     try:
         data = json.loads(path.read_text())
-    except json.JSONDecodeError, OSError:
+    except (json.JSONDecodeError, OSError):
         return None
 
     fetched_at = data.get("fetched_at")

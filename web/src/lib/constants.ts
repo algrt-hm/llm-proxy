@@ -5,6 +5,7 @@ export const PROVIDER_COLORS: Record<string, string> = {
   gemini: "bg-amber-100 text-amber-800",
   cerebras: "bg-red-100 text-red-800",
   anthropic: "bg-orange-100 text-orange-800",
+  deepseek: "bg-cyan-100 text-cyan-800",
 };
 
 export const PROVIDER_BAR_COLORS: Record<string, string> = {
@@ -14,6 +15,7 @@ export const PROVIDER_BAR_COLORS: Record<string, string> = {
   gemini: "#f59e0b",
   cerebras: "#ef4444",
   anthropic: "#f97316",
+  deepseek: "#06b6d4",
 };
 
 export const TIME_RANGES = [

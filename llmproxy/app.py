@@ -1,4 +1,5 @@
 import asyncio
+import codecs
 import json
 import logging
 import time
@@ -47,12 +48,13 @@ from .retry import (
     compute_delay,
     parse_gemini_retry_after,
 )
-from .schemas import ChatCompletionRequest, EmbeddingRequest
+from .schemas import ChatCompletionRequest, EmbeddingRequest, OllamaShowRequest
 from .tracing import (
     lookup_idempotency,
     lookup_response_cache,
     record_cache_hit,
     record_trace,
+    trace_stats,
 )
 from .utility import log_validation_results
 from .validation import ProviderStatus, get_or_validate
@@ -92,13 +94,86 @@ async def health() -> dict[str, str]:
 @app.get("/status")
 async def provider_status(request: Request) -> dict:
     results: dict[str, ProviderStatus] = request.app.state.provider_status
-    return {"providers": {name: {"ok": s.ok, "detail": s.detail} for name, s in results.items()}}
+    response: dict = {"providers": {name: {"ok": s.ok, "detail": s.detail} for name, s in results.items()}}
+    if trace_stats.trace_failures or trace_stats.cache_hit_failures:
+        response["trace_errors"] = {
+            "trace_failures": trace_stats.trace_failures,
+            "cache_hit_failures": trace_stats.cache_hit_failures,
+        }
+    return response
+
+
+@app.get("/version")
+async def version() -> dict[str, str]:
+    return {"version": PACKAGE_NAME}
+
+
+@app.get("/props")
+@app.get("/v1/props")
+async def props() -> dict:
+    return {
+        "total_slots": 1,
+        "chat_template": "",
+        "default_generation_settings": {},
+    }
+
+
+@app.get("/api/tags")
+async def ollama_tags(request: Request) -> dict:
+    models = request.app.state.provider_models
+    tags = []
+    for provider, model_list in models.items():
+        for m in model_list:
+            tags.append({
+                "name": f"{provider}/{m['id']}",
+                "model": f"{provider}/{m['id']}",
+                "modified_at": m.get("created", ""),
+            })
+    return {"models": tags}
+
+
+@app.post("/api/show")
+async def ollama_show(request: Request, payload: OllamaShowRequest) -> JSONResponse:
+    model_name = payload.name or payload.model or ""
+    provider, upstream_model = parse_model(model_name)
+    models = request.app.state.provider_models
+    for m in models.get(provider, []):
+        if m["id"] == upstream_model:
+            return JSONResponse(content={
+                "modelfile": "",
+                "parameters": "",
+                "template": "",
+                "details": {"family": provider, "format": "gguf"},
+                "model_info": m,
+            })
+    return JSONResponse(
+        status_code=404,
+        content={"error": f"model '{model_name}' not found"},
+    )
 
 
 def _filter_by_created(models: list[dict], after: str | None) -> list[dict]:
     if not after:
         return models
     return [m for m in models if m.get("created", "") >= after]
+
+
+@app.get("/v1/models/{provider}/{model_id:path}")
+async def get_model(provider: str, model_id: str, request: Request) -> JSONResponse:
+    provider = provider.lower()
+    if provider not in PROVIDERS:
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"message": f"Unknown provider: {provider}"}},
+        )
+    models = request.app.state.provider_models
+    for m in models.get(provider, []):
+        if m["id"] == model_id:
+            return JSONResponse(content={**m, "id": f"{provider}/{m['id']}", "owned_by": provider})
+    return JSONResponse(
+        status_code=404,
+        content={"error": {"message": f"Model not found: {provider}/{model_id}"}},
+    )
 
 
 @app.get("/v1/models/{provider}")
@@ -114,6 +189,7 @@ async def list_models(provider: str, request: Request, after: str | None = None)
     return JSONResponse(content={"object": "list", "data": data})
 
 
+@app.get("/api/v1/models")
 @app.get("/v1/models")
 async def list_all_models(request: Request, after: str | None = None) -> JSONResponse:
     models = request.app.state.provider_models
@@ -185,6 +261,146 @@ def _is_cache_enabled(value: Any) -> bool:
     raise ValueError("Invalid 'cache' value. Expected boolean true/false (also accepts 1/0 or true/false strings).")
 
 
+async def _proxy_http_request(
+    *,
+    client: httpx.AsyncClient,
+    url: str,
+    headers: dict[str, str],
+    params: dict[str, str],
+    payload: dict,
+    provider: str,
+    upstream_model: str,
+    request_id: str,
+    started: float,
+    idempotency_key: str | None,
+) -> JSONResponse:
+    """Non-streaming HTTP POST with retry, response parsing, and trace recording."""
+    response = None
+    last_retry_after = None
+    last_exc: Exception | None = None
+    openai_slot = None
+    for attempt in range(MAX_RETRIES + 1):
+        if provider == "openai":
+            openai_slot = await openai_rate_limiter.acquire(upstream_model)
+        try:
+            response = await client.post(url, headers=headers, params=params, json=payload)
+            last_exc = None
+        except httpx.TimeoutException as exception:
+            last_exc = exception
+            if attempt < MAX_RETRIES:
+                delay = compute_delay(attempt, None)
+                LOGGER.warning(
+                    "Retry %d/%d for %s/%s after %.1fs (timeout)",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    provider,
+                    upstream_model,
+                    delay,
+                )
+                await asyncio.sleep(delay)
+                continue
+            break
+        except httpx.HTTPError as exception:
+            last_exc = exception
+            if attempt < MAX_RETRIES:
+                delay = compute_delay(attempt, None)
+                LOGGER.warning(
+                    "Retry %d/%d for %s/%s after %.1fs (error=%s)",
+                    attempt + 1,
+                    MAX_RETRIES,
+                    provider,
+                    upstream_model,
+                    delay,
+                    exception,
+                )
+                await asyncio.sleep(delay)
+                continue
+            break
+
+        last_retry_after = response.headers.get("retry-after")
+        if response.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
+            delay = compute_delay(attempt, last_retry_after)
+            LOGGER.warning(
+                "Retry %d/%d for %s/%s after %.1fs (status=%d)",
+                attempt + 1,
+                MAX_RETRIES,
+                provider,
+                upstream_model,
+                delay,
+                response.status_code,
+            )
+            await asyncio.sleep(delay)
+            continue
+        break
+
+    if last_exc is not None:
+        latency_ms = round((time.perf_counter() - started) * 1000)
+        await record_trace(
+            request_id=request_id,
+            provider=provider,
+            model=upstream_model,
+            status_code=None,
+            latency_ms=latency_ms,
+            request_payload=payload,
+            response_payload=None,
+            error=str(last_exc),
+            idempotency_key=idempotency_key,
+        )
+        if isinstance(last_exc, httpx.TimeoutException):
+            return _error_response(
+                status.HTTP_504_GATEWAY_TIMEOUT,
+                "Upstream request timed out",
+                request_id,
+            )
+        return _error_response(
+            status.HTTP_502_BAD_GATEWAY,
+            "Upstream request failed",
+            request_id,
+        )
+
+    latency_ms = round((time.perf_counter() - started) * 1000)
+
+    response_payload: Any
+    content_type = response.headers.get("content-type", "")
+    if "application/json" in content_type.lower():
+        try:
+            response_payload = response.json()
+        except json.JSONDecodeError:
+            response_payload = {"raw": response.text}
+    else:
+        response_payload = {"raw": response.text}
+
+    if openai_slot is not None:
+        prompt_tokens = 0
+        if isinstance(response_payload, dict):
+            usage = response_payload.get("usage")
+            if isinstance(usage, dict):
+                prompt_tokens = usage.get("prompt_tokens", 0)
+        openai_rate_limiter.record(openai_slot, prompt_tokens)
+
+    await record_trace(
+        request_id=request_id,
+        provider=provider,
+        model=upstream_model,
+        status_code=response.status_code,
+        latency_ms=latency_ms,
+        request_payload=payload,
+        response_payload=response_payload,
+        idempotency_key=idempotency_key,
+    )
+
+    resp_headers = _filter_response_headers(response.headers, include_content_encoding=False)
+    resp_headers["x-request-id"] = request_id
+    # Forward Retry-After on final failure with retryable status.
+    if response.status_code in RETRYABLE_STATUSES and last_retry_after:
+        resp_headers["retry-after"] = last_retry_after
+    return JSONResponse(
+        content=response_payload,
+        status_code=response.status_code,
+        headers=resp_headers,
+    )
+
+
 async def _handle_gemini_request(
     *,
     request_id: str,
@@ -248,6 +464,7 @@ async def _handle_gemini_request(
                         )
                     usage_metadata = getattr(chunk, "usage_metadata", None) or usage_metadata
             except Exception as exception:  # noqa: BLE001
+                gemini_rate_limiter.record(slot, 0)
                 await record_trace(
                     request_id=request_id,
                     provider="gemini",
@@ -315,6 +532,7 @@ async def _handle_gemini_request(
             break
         except Exception as exception:  # noqa: BLE001
             last_exc = exception
+            gemini_rate_limiter.record(slot, 0)
             if attempt < MAX_RETRIES:
                 delay = compute_delay(attempt, None)
                 retry_after = parse_gemini_retry_after(exception)
@@ -344,7 +562,7 @@ async def _handle_gemini_request(
         )
         return _error_response(
             status.HTTP_502_BAD_GATEWAY,
-            f"Gemini request failed: {last_exc}",
+            "Gemini request failed",
             request_id,
         )
 
@@ -386,7 +604,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             f"Idempotency-Key exceeds maximum length of {MAX_IDEMPOTENCY_KEY_LEN}",
             request_id,
         )
-    incoming_payload = payload.model_dump(exclude_none=True)
+    incoming_payload = payload.model_dump(exclude_unset=True)
     provider, upstream_model = parse_model(payload.model)
     stream = bool(payload.stream)
 
@@ -489,36 +707,39 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
 
     config = get_provider_config(provider)
     if provider != "gemini" and not config.base_url:
-        message = f"{provider.upper()}_BASE_URL is not set"
+        detail = f"{provider.upper()}_BASE_URL is not set"
+        message = f"Provider {provider!r} is not configured"
         await record_trace(
             request_id=request_id,
             provider=provider,
             model=upstream_model,
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
-            error=message,
+            error=detail,
             idempotency_key=idempotency_key,
         )
-        return _error_response(status.HTTP_400_BAD_REQUEST, message, request_id)
+        return _error_response(status.HTTP_503_SERVICE_UNAVAILABLE, message, request_id)
     if not config.api_key:
-        if provider == "gemini":
-            message = "GEMINI_API_KEY or GOOGLE_API_KEY is not set"
-        else:
-            message = f"{provider.upper()}_API_KEY is not set"
+        detail = (
+            "GEMINI_API_KEY or GOOGLE_API_KEY is not set"
+            if provider == "gemini"
+            else f"{provider.upper()}_API_KEY is not set"
+        )
+        message = f"Provider {provider!r} is not configured"
         await record_trace(
             request_id=request_id,
             provider=provider,
             model=upstream_model,
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
-            error=message,
+            error=detail,
             idempotency_key=idempotency_key,
         )
-        return _error_response(status.HTTP_400_BAD_REQUEST, message, request_id)
+        return _error_response(status.HTTP_503_SERVICE_UNAVAILABLE, message, request_id)
 
     if provider == "gemini":
         return await _handle_gemini_request(
@@ -543,6 +764,11 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
     client: httpx.AsyncClient = request.app.state.http_client
 
     if stream:
+        # Ask upstream to include usage stats in the final streaming chunk.
+        outgoing_payload = {
+            **outgoing_payload,
+            "stream_options": {"include_usage": True},
+        }
         # Streaming: retry on retryable status before streaming begins.
         openai_slot: list | None = None
         if provider == "openai":
@@ -637,16 +863,64 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             break
 
         async def stream_body():
-            chunks: list[bytes] = []
+            text_parts: list[str] = []
+            usage: dict | None = None
+            created: int | None = None
+            buf = ""
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
             try:
-                async for chunk in response.aiter_raw():
-                    chunks.append(chunk)
-                    yield chunk
+                async for raw_chunk in response.aiter_raw():
+                    yield raw_chunk
+                    buf += decoder.decode(raw_chunk)
+                    # Process complete SSE lines from the buffer.
+                    while "\n" in buf:
+                        line, buf = buf.split("\n", 1)
+                        line = line.strip()
+                        if not line.startswith("data: ") or line == "data: [DONE]":
+                            continue
+                        try:
+                            parsed = json.loads(line[6:])
+                        except json.JSONDecodeError:
+                            continue
+                        if created is None:
+                            created = parsed.get("created")
+                        for choice in parsed.get("choices") or []:
+                            content = (choice.get("delta") or {}).get("content")
+                            if content:
+                                text_parts.append(content)
+                        if parsed.get("usage"):
+                            usage = parsed["usage"]
+                # Flush decoder and process any remaining data in the buffer.
+                buf += decoder.decode(b"", final=True)
+                remaining = buf.strip()
+                if remaining.startswith("data: ") and remaining != "data: [DONE]":
+                    try:
+                        parsed = json.loads(remaining[6:])
+                        if created is None:
+                            created = parsed.get("created")
+                        for choice in parsed.get("choices") or []:
+                            content = (choice.get("delta") or {}).get("content")
+                            if content:
+                                text_parts.append(content)
+                        if parsed.get("usage"):
+                            usage = parsed["usage"]
+                    except json.JSONDecodeError:
+                        pass
             finally:
-                await response.aclose()
+                try:
+                    await response.aclose()
+                except Exception:  # noqa: BLE001
+                    LOGGER.warning("Failed to close upstream response for %s", request_id)
+                reconstructed = build_openai_response(
+                    request_id=request_id,
+                    model=upstream_model,
+                    text="".join(text_parts),
+                    usage=usage,
+                    created=created,
+                )
+                prompt_tokens = (usage or {}).get("prompt_tokens", 0)
                 if openai_slot is not None:
-                    openai_rate_limiter.record(openai_slot, 0)
-                raw = b"".join(chunks).decode(errors="replace")
+                    openai_rate_limiter.record(openai_slot, prompt_tokens)
                 await record_trace(
                     request_id=request_id,
                     provider=provider,
@@ -654,7 +928,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                     status_code=response.status_code,
                     latency_ms=round((time.perf_counter() - started) * 1000),
                     request_payload=outgoing_payload,
-                    response_payload={"raw": raw},
+                    response_payload=reconstructed,
                     idempotency_key=idempotency_key,
                 )
 
@@ -667,135 +941,17 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             headers=filtered_headers,
         )
 
-    # Non-streaming HTTP: retry on retryable status or transient exceptions.
-    response = None
-    last_retry_after = None
-    last_exc: Exception | None = None
-    openai_slot = None
-    for attempt in range(MAX_RETRIES + 1):
-        if provider == "openai":
-            openai_slot = await openai_rate_limiter.acquire(upstream_model)
-        try:
-            response = await client.post(
-                url,
-                headers=headers,
-                params=auth_params,
-                json=outgoing_payload,
-            )
-            last_exc = None
-        except httpx.TimeoutException as exception:
-            last_exc = exception
-            if attempt < MAX_RETRIES:
-                delay = compute_delay(attempt, None)
-                LOGGER.warning(
-                    "Retry %d/%d for %s/%s after %.1fs (timeout)",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    provider,
-                    upstream_model,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-                continue
-            break
-        except httpx.HTTPError as exception:
-            last_exc = exception
-            if attempt < MAX_RETRIES:
-                delay = compute_delay(attempt, None)
-                LOGGER.warning(
-                    "Retry %d/%d for %s/%s after %.1fs (error=%s)",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    provider,
-                    upstream_model,
-                    delay,
-                    exception,
-                )
-                await asyncio.sleep(delay)
-                continue
-            break
-
-        last_retry_after = response.headers.get("retry-after")
-        if response.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
-            delay = compute_delay(attempt, last_retry_after)
-            LOGGER.warning(
-                "Retry %d/%d for %s/%s after %.1fs (status=%d)",
-                attempt + 1,
-                MAX_RETRIES,
-                provider,
-                upstream_model,
-                delay,
-                response.status_code,
-            )
-            await asyncio.sleep(delay)
-            continue
-        break
-
-    if last_exc is not None:
-        latency_ms = round((time.perf_counter() - started) * 1000)
-        await record_trace(
-            request_id=request_id,
-            provider=provider,
-            model=upstream_model,
-            status_code=None,
-            latency_ms=latency_ms,
-            request_payload=outgoing_payload,
-            response_payload=None,
-            error=str(last_exc),
-            idempotency_key=idempotency_key,
-        )
-        if isinstance(last_exc, httpx.TimeoutException):
-            return _error_response(
-                status.HTTP_504_GATEWAY_TIMEOUT,
-                "Upstream request timed out",
-                request_id,
-            )
-        return _error_response(
-            status.HTTP_502_BAD_GATEWAY,
-            "Upstream request failed",
-            request_id,
-        )
-
-    latency_ms = round((time.perf_counter() - started) * 1000)
-
-    response_payload: Any
-    content_type = response.headers.get("content-type", "")
-    if "application/json" in content_type.lower():
-        try:
-            response_payload = response.json()
-        except json.JSONDecodeError:
-            response_payload = {"raw": response.text}
-    else:
-        response_payload = {"raw": response.text}
-
-    if openai_slot is not None:
-        prompt_tokens = 0
-        if isinstance(response_payload, dict):
-            usage = response_payload.get("usage")
-            if isinstance(usage, dict):
-                prompt_tokens = usage.get("prompt_tokens", 0)
-        openai_rate_limiter.record(openai_slot, prompt_tokens)
-
-    await record_trace(
-        request_id=request_id,
+    return await _proxy_http_request(
+        client=client,
+        url=url,
+        headers=headers,
+        params=auth_params,
+        payload=outgoing_payload,
         provider=provider,
-        model=upstream_model,
-        status_code=response.status_code,
-        latency_ms=latency_ms,
-        request_payload=outgoing_payload,
-        response_payload=response_payload,
+        upstream_model=upstream_model,
+        request_id=request_id,
+        started=started,
         idempotency_key=idempotency_key,
-    )
-
-    resp_headers = _filter_response_headers(response.headers, include_content_encoding=False)
-    resp_headers["x-request-id"] = request_id
-    # Forward Retry-After on final failure with retryable status.
-    if response.status_code in RETRYABLE_STATUSES and last_retry_after:
-        resp_headers["retry-after"] = last_retry_after
-    return JSONResponse(
-        content=response_payload,
-        status_code=response.status_code,
-        headers=resp_headers,
     )
 
 
@@ -810,7 +966,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
             f"Idempotency-Key exceeds maximum length of {MAX_IDEMPOTENCY_KEY_LEN}",
             request_id,
         )
-    incoming_payload = payload.model_dump(exclude_none=True)
+    incoming_payload = payload.model_dump(exclude_unset=True)
     provider, upstream_model = parse_model(payload.model)
 
     cache_value = incoming_payload.get("cache", True)
@@ -908,36 +1064,39 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
 
     config = get_provider_config(provider)
     if provider != "gemini" and not config.base_url:
-        message = f"{provider.upper()}_BASE_URL is not set"
+        detail = f"{provider.upper()}_BASE_URL is not set"
+        message = f"Provider {provider!r} is not configured"
         await record_trace(
             request_id=request_id,
             provider=provider,
             model=upstream_model,
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
-            error=message,
+            error=detail,
             idempotency_key=idempotency_key,
         )
-        return _error_response(status.HTTP_400_BAD_REQUEST, message, request_id)
+        return _error_response(status.HTTP_503_SERVICE_UNAVAILABLE, message, request_id)
     if not config.api_key:
-        if provider == "gemini":
-            message = "GEMINI_API_KEY or GOOGLE_API_KEY is not set"
-        else:
-            message = f"{provider.upper()}_API_KEY is not set"
+        detail = (
+            "GEMINI_API_KEY or GOOGLE_API_KEY is not set"
+            if provider == "gemini"
+            else f"{provider.upper()}_API_KEY is not set"
+        )
+        message = f"Provider {provider!r} is not configured"
         await record_trace(
             request_id=request_id,
             provider=provider,
             model=upstream_model,
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             latency_ms=round((time.perf_counter() - started) * 1000),
             request_payload=trace_payload,
             response_payload=None,
-            error=message,
+            error=detail,
             idempotency_key=idempotency_key,
         )
-        return _error_response(status.HTTP_400_BAD_REQUEST, message, request_id)
+        return _error_response(status.HTTP_503_SERVICE_UNAVAILABLE, message, request_id)
 
     # Normalize input to list of strings.
     raw_input = payload.input
@@ -974,6 +1133,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
                 break
             except Exception as exception:  # noqa: BLE001
                 last_exc = exception
+                gemini_rate_limiter.record(slot, 0)
                 if attempt < MAX_RETRIES:
                     delay = compute_delay(attempt, None)
                     retry_after = parse_gemini_retry_after(exception)
@@ -1003,7 +1163,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
             )
             return _error_response(
                 status.HTTP_502_BAD_GATEWAY,
-                f"Gemini embedding request failed: {last_exc}",
+                "Gemini embedding request failed",
                 request_id,
             )
 
@@ -1039,131 +1199,15 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
     url = build_embeddings_url(config.base_url)
     client: httpx.AsyncClient = request.app.state.http_client
 
-    response = None
-    last_retry_after = None
-    last_exc = None
-    openai_slot = None
-    for attempt in range(MAX_RETRIES + 1):
-        if provider == "openai":
-            openai_slot = await openai_rate_limiter.acquire(upstream_model)
-        try:
-            response = await client.post(
-                url,
-                headers=http_headers,
-                params=auth_params,
-                json=outgoing_payload,
-            )
-            last_exc = None
-        except httpx.TimeoutException as exception:
-            last_exc = exception
-            if attempt < MAX_RETRIES:
-                delay = compute_delay(attempt, None)
-                LOGGER.warning(
-                    "Retry %d/%d for %s/%s after %.1fs (timeout)",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    provider,
-                    upstream_model,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-                continue
-            break
-        except httpx.HTTPError as exception:
-            last_exc = exception
-            if attempt < MAX_RETRIES:
-                delay = compute_delay(attempt, None)
-                LOGGER.warning(
-                    "Retry %d/%d for %s/%s after %.1fs (error=%s)",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    provider,
-                    upstream_model,
-                    delay,
-                    exception,
-                )
-                await asyncio.sleep(delay)
-                continue
-            break
-
-        last_retry_after = response.headers.get("retry-after")
-        if response.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
-            delay = compute_delay(attempt, last_retry_after)
-            LOGGER.warning(
-                "Retry %d/%d for %s/%s after %.1fs (status=%d)",
-                attempt + 1,
-                MAX_RETRIES,
-                provider,
-                upstream_model,
-                delay,
-                response.status_code,
-            )
-            await asyncio.sleep(delay)
-            continue
-        break
-
-    if last_exc is not None:
-        latency_ms = round((time.perf_counter() - started) * 1000)
-        await record_trace(
-            request_id=request_id,
-            provider=provider,
-            model=upstream_model,
-            status_code=None,
-            latency_ms=latency_ms,
-            request_payload=outgoing_payload,
-            response_payload=None,
-            error=str(last_exc),
-            idempotency_key=idempotency_key,
-        )
-        if isinstance(last_exc, httpx.TimeoutException):
-            return _error_response(
-                status.HTTP_504_GATEWAY_TIMEOUT,
-                "Upstream request timed out",
-                request_id,
-            )
-        return _error_response(
-            status.HTTP_502_BAD_GATEWAY,
-            "Upstream request failed",
-            request_id,
-        )
-
-    latency_ms = round((time.perf_counter() - started) * 1000)
-
-    response_payload: Any
-    content_type = response.headers.get("content-type", "")
-    if "application/json" in content_type.lower():
-        try:
-            response_payload = response.json()
-        except json.JSONDecodeError:
-            response_payload = {"raw": response.text}
-    else:
-        response_payload = {"raw": response.text}
-
-    if openai_slot is not None:
-        prompt_tokens = 0
-        if isinstance(response_payload, dict):
-            usage = response_payload.get("usage")
-            if isinstance(usage, dict):
-                prompt_tokens = usage.get("prompt_tokens", 0)
-        openai_rate_limiter.record(openai_slot, prompt_tokens)
-
-    await record_trace(
-        request_id=request_id,
+    return await _proxy_http_request(
+        client=client,
+        url=url,
+        headers=http_headers,
+        params=auth_params,
+        payload=outgoing_payload,
         provider=provider,
-        model=upstream_model,
-        status_code=response.status_code,
-        latency_ms=latency_ms,
-        request_payload=outgoing_payload,
-        response_payload=response_payload,
+        upstream_model=upstream_model,
+        request_id=request_id,
+        started=started,
         idempotency_key=idempotency_key,
-    )
-
-    resp_headers = _filter_response_headers(response.headers, include_content_encoding=False)
-    resp_headers["x-request-id"] = request_id
-    if response.status_code in RETRYABLE_STATUSES and last_retry_after:
-        resp_headers["retry-after"] = last_retry_after
-    return JSONResponse(
-        content=response_payload,
-        status_code=response.status_code,
-        headers=resp_headers,
     )

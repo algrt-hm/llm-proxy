@@ -31,13 +31,14 @@ CHEAP_PERPLEXITY_MODEL = sonar-pro
 CHEAP_GEMINI_MODEL = gemini-3-flash-preview
 CHEAP_CEREBRAS_MODEL = llama3.1-8b
 CHEAP_ANTHROPIC_MODEL = claude-3-haiku-20240307
+CHEAP_DEEPSEEK_MODEL = deepseek-chat
 
 run:
 	LLM_PROXY_PORT=6969 uv run python main.py
 
 run-alt-postgres:
 	@if [ -z "$$LLM_PROXY_DATABASE_URL" ]; then echo "LLM_PROXY_DATABASE_URL is not set"; exit 1; fi
-	LLM_PROXY_RUN_ALT_POSTGRES=1 LLM_PROXY_PORT=6969 LLM_PROXY_DB_URL=$$(echo "$$LLM_PROXY_DATABASE_URL" | sed 's/postgresql:/postgresql+asyncpg:/') nice -n20 uv run python main.py
+	LLM_PROXY_RUN_ALT_POSTGRES=1 LLM_PROXY_PORT=6969 LLM_PROXY_DB_URL=$$(echo "$$LLM_PROXY_DATABASE_URL" | sed 's|^postgresql\(+[a-z]*\)\?://|postgresql+asyncpg://|') nice -n20 uv run python main.py 2>&1 | tee llm-proxy-alt.log
 
 ping-providers:
 	LLM_PROXY_BASE_URL=http://localhost:6969 \
@@ -52,6 +53,7 @@ ping-providers-all:
 	LLM_PROXY_TEST_MODEL_GEMINI=$(CHEAP_GEMINI_MODEL) \
 	LLM_PROXY_TEST_MODEL_CEREBRAS=$(CHEAP_CEREBRAS_MODEL) \
 	LLM_PROXY_TEST_MODEL_ANTHROPIC=$(CHEAP_ANTHROPIC_MODEL) \
+	LLM_PROXY_TEST_MODEL_DEEPSEEK=$(CHEAP_DEEPSEEK_MODEL) \
 	uv run python scripts/ping_providers.py
 
 stop:

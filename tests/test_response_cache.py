@@ -113,8 +113,8 @@ async def test_cache_false_disables_lookup(monkeypatch):
     response = await app_module.chat_completions(_build_request(), payload)
     body = json.loads(response.body)
 
-    assert response.status_code == 400
-    assert body["error"]["message"] == "OPENAI_API_KEY is not set"
+    assert response.status_code == 503
+    assert body["error"]["message"] == "Provider 'openai' is not configured"
 
 
 @pytest.mark.asyncio
@@ -225,9 +225,9 @@ async def test_idempotency_rejects_chat_response_on_embeddings_endpoint(monkeypa
     response = await app_module.embeddings(req, payload)
     body = json.loads(response.body)
 
-    # Should NOT return the cached chat response — falls through to API key check.
-    assert response.status_code == 400
-    assert "API_KEY" in body["error"]["message"]
+    # Should NOT return the cached chat response — falls through to provider-not-configured check.
+    assert response.status_code == 503
+    assert "not configured" in body["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -271,9 +271,9 @@ async def test_idempotency_rejects_embedding_response_on_chat_endpoint(monkeypat
     response = await app_module.chat_completions(req, payload)
     body = json.loads(response.body)
 
-    # Should NOT return the cached embedding response — falls through to API key check.
-    assert response.status_code == 400
-    assert "API_KEY" in body["error"]["message"]
+    # Should NOT return the cached embedding response — falls through to provider-not-configured check.
+    assert response.status_code == 503
+    assert "not configured" in body["error"]["message"]
 
 
 # --- Response cache cross-endpoint rejection ---
@@ -315,9 +315,9 @@ async def test_response_cache_rejects_embedding_on_chat_endpoint(monkeypatch):
     response = await app_module.chat_completions(_build_request(), payload)
     body = json.loads(response.body)
 
-    # Should NOT return the cached embedding response — falls through to API key check.
-    assert response.status_code == 400
-    assert "API_KEY" in body["error"]["message"]
+    # Should NOT return the cached embedding response — falls through to provider-not-configured check.
+    assert response.status_code == 503
+    assert "not configured" in body["error"]["message"]
 
 
 @pytest.mark.asyncio
@@ -354,9 +354,9 @@ async def test_response_cache_rejects_chat_on_embeddings_endpoint(monkeypatch):
     response = await app_module.embeddings(req, payload)
     body = json.loads(response.body)
 
-    # Should NOT return the cached chat response — falls through to API key check.
-    assert response.status_code == 400
-    assert "API_KEY" in body["error"]["message"]
+    # Should NOT return the cached chat response — falls through to provider-not-configured check.
+    assert response.status_code == 503
+    assert "not configured" in body["error"]["message"]
 
 
 # --- Empty embedding input ---

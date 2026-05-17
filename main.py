@@ -1,4 +1,5 @@
 import argparse
+import copy
 import ipaddress
 import os
 import re
@@ -83,9 +84,6 @@ def _is_valid_hostname(hostname: str) -> bool:
         return False
 
     labels = cleaned.split(".")
-    if not labels:
-        return False
-
     for label in labels:
         if not HOST_LABEL_RE.fullmatch(label):
             return False
@@ -96,7 +94,10 @@ def _is_valid_hostname(hostname: str) -> bool:
 
 
 def _validate_db_url_hostname(db_url: str) -> str | None:
-    hostname = URL(db_url).host
+    try:
+        hostname = URL(db_url).host
+    except (ValueError, TypeError):
+        return "LLM_PROXY_DB_URL is not a valid URL"
     if not hostname:
         return "LLM_PROXY_DB_URL must include a hostname"
     if not _is_valid_hostname(hostname):
@@ -168,19 +169,23 @@ def main(argv: list[str] | None = None) -> None:
         if status:
             raise SystemExit(status)
 
-    host = os.getenv("LLM_PROXY_HOST", "0.0.0.0")
-    port = int(os.getenv("LLM_PROXY_PORT", "8000"))
-    reload_enabled = os.getenv("LLM_PROXY_RELOAD", "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-    }
+    host = (_env_value("LLM_PROXY_HOST") or "0.0.0.0")
+    port_raw = _env_value("LLM_PROXY_PORT") or "8000"
+    try:
+        port = int(port_raw)
+    except ValueError:
+        print(f"LLM_PROXY_PORT must be a valid integer, got: {port_raw!r}")
+        raise SystemExit(1)
+    reload_enabled = _bool_env("LLM_PROXY_RELOAD")
     display_host = "localhost" if host == "0.0.0.0" else host
     base = f"http://{display_host}:{port}"
     print(f"\n  Docs:   {base}/docs")
     print(f"  ReDoc:  {base}/redoc")
     print(f"  OpenAPI JSON: {base}/openapi.json\n")
-    uvicorn.run("llmproxy.app:app", host=host, port=port, reload=reload_enabled)
+    log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+    log_config["formatters"]["default"]["fmt"] = "%(asctime)s - %(levelprefix)s %(message)s"
+    log_config["formatters"]["access"]["fmt"] = '%(asctime)s - %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+    uvicorn.run("llmproxy.app:app", host=host, port=port, reload=reload_enabled, log_config=log_config)
 
 
 if __name__ == "__main__":

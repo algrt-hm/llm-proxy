@@ -120,7 +120,7 @@ def main() -> int:
                 continue
 
             payload = {
-                "model": f"{provider}:{model}",
+                "model": f"{provider}/{model}",
                 "messages": [{"role": "user", "content": "ping"}],
             }
 

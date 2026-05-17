@@ -22,6 +22,8 @@ wheels/
 *.db
 .env
 llmproxy_models.json
+llmproxy_validation.json
+llm-proxy-alt.log
 
 # Next.js frontend
 web/node_modules/

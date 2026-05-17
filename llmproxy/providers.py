@@ -1,6 +1,12 @@
+import logging
+from functools import lru_cache
 from os import getenv
 
 from pydantic import BaseModel, ConfigDict
+
+from .constants import PACKAGE_NAME
+
+LOGGER = logging.getLogger(PACKAGE_NAME)
 
 PROVIDERS = (
     "openai",
@@ -12,6 +18,12 @@ PROVIDERS = (
     "deepseek",
 )
 DEFAULT_PROVIDER = getenv("LLM_PROXY_DEFAULT_PROVIDER", "openai").strip().lower()
+if DEFAULT_PROVIDER not in PROVIDERS:
+    raise ValueError(
+        f"LLM_PROXY_DEFAULT_PROVIDER={DEFAULT_PROVIDER!r} is not a recognised provider. "
+        f"Valid providers: {', '.join(PROVIDERS)}"
+    )
+DEFAULT_MODEL = getenv("LLM_PROXY_DEFAULT_MODEL", "deepseek/deepseek-v4-pro").strip()
 DEFAULT_BASE_URLS: dict[str, str] = {
     "openai": "https://api.openai.com/v1",
     "openrouter": "https://openrouter.ai/api/v1",
@@ -38,19 +50,24 @@ class ProviderConfig(BaseModel):
 
 def parse_model(model: str) -> tuple[str, str]:
     cleaned = model.strip()
+    if not cleaned:
+        cleaned = DEFAULT_MODEL
     if ":" in cleaned:
         prefix, rest = cleaned.split(":", 1)
         prefix = prefix.lower()
         if prefix in PROVIDERS and rest:
+            LOGGER.warning("Colon delimiter is deprecated, use '%s/%s' instead of '%s'", prefix, rest, cleaned)
             return prefix, rest
     if "/" in cleaned:
         prefix, rest = cleaned.split("/", 1)
         prefix = prefix.lower()
         if prefix in PROVIDERS and rest:
             return prefix, rest
+        LOGGER.warning("Unrecognised provider prefix %r in model %r, falling back to %r", prefix, cleaned, DEFAULT_PROVIDER)
     return DEFAULT_PROVIDER, cleaned
 
 
+@lru_cache(maxsize=len(PROVIDERS))
 def get_provider_config(name: str) -> ProviderConfig:
     key = name.upper()
     if name == "gemini":

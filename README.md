@@ -20,12 +20,17 @@ llm-proxy implements the OpenAI chat and embeddings APIs
 
 (see: https://app.stainless.com/api/spec/documented/openai/openapi.documented.yml)
 
-and uses OpenAI-compatible endpoints. You select the model/provider via the `model` field
+and uses OpenAI-compatible endpoints. It also provides Ollama and llama.cpp compatibility
+endpoints (`/api/tags`, `/api/show`, `/version`, `/props`) so clients like Open WebUI can
+discover and use models without extra configuration.
+
+You select the model/provider via the `model` field
 (Perplexity, OpenAI, OpenRouter, Google Gemini, Cerebras, Anthropic, DeepSeek).
 
 Model selection supports a provider prefix, e.g. `openai:gpt-4o-mini`,
 `openrouter:openai/gpt-4o-mini`, or `openai/gpt-4o-mini`.
 If no prefix is provided, `LLM_PROXY_DEFAULT_PROVIDER` is used (defaults to `openai`).
+If the `model` field is omitted or empty, `LLM_PROXY_DEFAULT_MODEL` is used (defaults to `deepseek/deepseek-v4-pro`).
 
 Each provider needs an API key. Base URLs have built-in defaults and can be overridden via:
 - OPENAI_API_KEY / OPENAI_BASE_URL
@@ -54,6 +59,7 @@ Inbound authentication is not implemented; this is intended for internal use.
 | `LLM_PROXY_PORT` | `8000` | Server port |
 | `LLM_PROXY_RELOAD` | off | Enable dev auto-reload (`1`, `true`, or `yes`) |
 | `LLM_PROXY_DEFAULT_PROVIDER` | `openai` | Provider used when model has no prefix |
+| `LLM_PROXY_DEFAULT_MODEL` | `deepseek/deepseek-v4-pro` | Model (with optional provider prefix) used when `model` field is omitted or empty |
 | `LLM_PROXY_TIMEOUT_S` | `300` | HTTP request timeout (seconds) |
 | `LLM_PROXY_DB_URL` | `sqlite+aiosqlite:///./llmproxy.db` | SQLAlchemy database URL (SQLite 3.35+ and Postgres supported, e.g. `postgresql+asyncpg://user:pass@localhost/llmproxy`) |
 | `LLM_PROXY_MAX_RETRIES` | `2` | Max retry attempts on transient upstream errors (429, 502, 503, 504) |
@@ -74,14 +80,22 @@ Full tracing is recorded to the database. Database interaction uses SQLAlchemy s
 
 ## Response caching
 
-- Non-streaming `POST /v1/chat/completions` and `POST /v1/embeddings` requests are cached by `(provider, model, request payload)` using the SQLite `traces` table.
+- Non-streaming `POST /v1/chat/completions` and `POST /v1/embeddings` requests are cached by `(provider, model, request payload)` using the `traces` table.
 - Embeddings are always eligible for caching (never streaming) and benefit especially since they are deterministic.
 - Cache lookups are enabled by default.
 - Disable cache lookup for a specific request with `cache: false` in the request body.
 - Invalid `cache` values return `400` (expected boolean-like value).
-- Streaming responses are not served from this cache.
+- Streaming responses are not served from cache (the `stream` flag is part of the cache key, so streaming and non-streaming requests never collide).
 - Degenerate chat completions (all choices have null or empty content) are not served from cache, preventing cache poisoning from flaky provider responses.
 - Cache hits (both response and idempotency) are logged to a `cache_hits` table for observability.
+
+## Streaming
+
+- Streaming chat completions (`stream: true`) are proxied through as raw SSE from upstream to the client with no transformation overhead.
+- As chunks pass through, the proxy incrementally parses SSE data lines to extract the assistant text and usage metadata — no buffering of the full raw response in memory.
+- After the stream completes, a structured `chat.completion` trace (same shape as non-streaming responses, including token usage) is recorded to the database.
+- Gemini streaming uses the Google GenAI SDK and builds OpenAI-compatible SSE chunks on the fly.
+- Trace writes are shielded from client disconnects via `asyncio.shield`, so a client dropping mid-stream does not lose the trace.
 
 ## Formatting and linting
 
@@ -92,6 +106,10 @@ Full tracing is recorded to the database. Database interaction uses SQLAlchemy s
 - `make run` (port `6969`, SQLite DB)
 - `make run-alt-postgres` (port `6969`, Postgres DB via `LLM_PROXY_DATABASE_URL`, runs at low CPU priority via `nice -n20`)
 - `uv run python main.py --require-db-url` (fail fast if `LLM_PROXY_DB_URL` is unset)
+
+The server binds to `0.0.0.0` by default, so it is accessible to other machines on the LAN.
+For OpenAI-compatible clients on the same network, use `http://<LAN_IP>:6969/v1` as the base URL (no API key required).
+Clients that probe for Ollama or llama.cpp endpoints (e.g. Open WebUI) will also work — the proxy responds to `/api/tags`, `/api/show`, `/api/v1/models`, `/version`, and `/props`.
 
 ## Provider checks
 
@@ -130,7 +148,6 @@ Pages: Dashboard (`/`), Traces (`/traces` — split-pane with inline detail), Ca
 .
 ├─ .gitignore               # Git ignore rules
 ├─ .python-version          # Python version pin
-├─ AGENTS.md                # Agent notes (checked in)
 ├─ CLAUDE.md                # Agent notes (gitignored, local only)
 ├─ makefile                 # Developer tasks (help/run/run-alt-postgres/stop/ping/validate/format/lint/test/stats-sqlite/stats-postgres/install-web/dev-web/build-web/lint-web)
 ├─ main.py                  # Uvicorn entrypoint for llmproxy.app:app
@@ -149,23 +166,27 @@ Pages: Dashboard (`/`), Traces (`/traces` — split-pane with inline detail), Ca
 │  ├─ test_response_cache.py # Response cache, idempotency cross-endpoint rejection, empty input validation, degenerate response rejection tests
 │  ├─ test_payload_passthrough.py  # Schema extra-field passthrough + URL builder tests
 │  └─ test_main_preflight.py # Preflight checks: --require-db-url, DB URL validation, missing API keys
-└─ llmproxy/
-   ├─ __init__.py           # Package version
-   ├─ app.py                # FastAPI app, routing, proxy logic (chat + embeddings), tracing hooks
-   ├─ providers.py          # Provider parsing, auth config, base URL + endpoint URL builders (chat + embeddings)
-   ├─ gemini.py             # Gemini SDK adapter (chat + embeddings) + OpenAI response mapping
-   ├─ schemas.py            # Pydantic request models (ChatCompletionRequest, EmbeddingRequest; extra=allow)
-   ├─ db.py                 # SQLAlchemy async engine + trace/cache_hits tables + DB URL redaction
-   ├─ retry.py              # Retry config, Retry-After parsing, Gemini retry-hint parsing, backoff delay
-   ├─ ratelimit.py          # Client-side rate limiter (sliding window, RPM + TPM, per-model limits, stale eviction)
-   ├─ tracing.py            # Trace persistence, cache-hit logging, provider/model-scoped idempotency + response-cache lookup
-   ├─ validation.py         # Concurrent provider key validation + disk caching
-   └─ models.py             # Concurrent per-provider model listing, models.dev enrichment + disk caching
-├─ web/                      # Next.js trace viewer frontend (App Router, TypeScript, Tailwind)
-│  ├─ package.json           # Frontend deps (next, react, tailwindcss, pg)
-│  ├─ next.config.ts         # Next.js config
-│  ├─ src/lib/db.ts          # Shared Postgres pool (pg.Pool, DATABASE_URL)
-│  ├─ src/app/               # Pages: dashboard (/), traces (split-pane), cache hits (split-pane)
-│  ├─ src/app/api/traces/    # API routes querying Postgres directly
-│  └─ src/components/        # Nav, JsonTree, BarChart, TraceTable, CacheHitDetailPanel, filters, badges
+├─ llmproxy/
+│  ├─ __init__.py           # Package version
+│  ├─ app.py                # FastAPI app, routing, proxy logic (chat + embeddings), compatibility endpoints, streaming SSE parse
+│  ├─ constants.py          # Package name, Anthropic API version, validation timeout
+│  ├─ db.py                 # SQLAlchemy async engine + trace/cache_hits tables + DB URL redaction
+│  ├─ gemini.py             # Gemini SDK adapter (chat + embeddings) + OpenAI response mapping
+│  ├─ libraries.md          # Library reference notes (httpx.AsyncClient)
+│  ├─ models.py             # Concurrent per-provider model listing, models.dev enrichment + disk caching
+│  ├─ openai.py             # OpenAI response/chunk builders (chat completion, stream chunk, done chunk, embedding response, usage mapping)
+│  ├─ providers.py          # Provider parsing, default model, auth config, base URL + endpoint URL builders (chat + embeddings)
+│  ├─ ratelimit.py          # Client-side rate limiter (sliding window, RPM + TPM, per-model limits, stale eviction)
+│  ├─ retry.py              # Retry config, Retry-After parsing, Gemini retry-hint parsing, backoff delay
+│  ├─ schemas.py            # Pydantic request models (ChatCompletionRequest, EmbeddingRequest; model optional, extra=allow)
+│  ├─ tracing.py            # Trace persistence (asyncio.shield), cache-hit logging, idempotency + response-cache lookup
+│  ├─ utility.py            # Logging helpers (validation result formatting)
+│  └─ validation.py         # Concurrent provider key validation + in-memory caching
+└─ web/                      # Next.js trace viewer frontend (App Router, TypeScript, Tailwind)
+   ├─ package.json           # Frontend deps (next, react, tailwindcss, pg)
+   ├─ next.config.ts         # Next.js config
+   ├─ src/lib/db.ts          # Shared Postgres pool (pg.Pool, DATABASE_URL)
+   ├─ src/app/               # Pages: dashboard (/), traces (split-pane), cache hits (split-pane)
+   ├─ src/app/api/traces/    # API routes querying Postgres directly
+   └─ src/components/        # Nav, JsonTree, BarChart, TraceTable, CacheHitDetailPanel, filters, badges
 ```
