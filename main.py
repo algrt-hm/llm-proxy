@@ -96,7 +96,7 @@ def _is_valid_hostname(hostname: str) -> bool:
 def _validate_db_url_hostname(db_url: str) -> str | None:
     try:
         hostname = URL(db_url).host
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return "LLM_PROXY_DB_URL is not a valid URL"
     if not hostname:
         return "LLM_PROXY_DB_URL must include a hostname"
@@ -169,7 +169,7 @@ def main(argv: list[str] | None = None) -> None:
         if status:
             raise SystemExit(status)
 
-    host = (_env_value("LLM_PROXY_HOST") or "0.0.0.0")
+    host = _env_value("LLM_PROXY_HOST") or "0.0.0.0"
     port_raw = _env_value("LLM_PROXY_PORT") or "8000"
     try:
         port = int(port_raw)

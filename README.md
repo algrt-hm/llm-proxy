@@ -71,7 +71,7 @@ Full tracing is recorded to the database. Database interaction uses SQLAlchemy s
 
 ## Retries
 
-- Retryable upstream conditions: HTTP status `429/502/503/504`, timeout exceptions, and connection errors.
+- Retryable upstream conditions: HTTP status `429/502/503/504` and connection errors. Timeout exceptions are **not retried** (fails immediately with 504).
 - Default retry count: `LLM_PROXY_MAX_RETRIES=2` (up to 3 total attempts).
 - Baseline delay is exponential backoff: `LLM_PROXY_RETRY_BASE_DELAY_S * 2^attempt`.
 - HTTP providers: `Retry-After` header is parsed and delay uses `max(retry_after, backoff)` through the shared helper.

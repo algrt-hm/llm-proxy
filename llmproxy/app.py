@@ -124,11 +124,13 @@ async def ollama_tags(request: Request) -> dict:
     tags = []
     for provider, model_list in models.items():
         for m in model_list:
-            tags.append({
-                "name": f"{provider}/{m['id']}",
-                "model": f"{provider}/{m['id']}",
-                "modified_at": m.get("created", ""),
-            })
+            tags.append(
+                {
+                    "name": f"{provider}/{m['id']}",
+                    "model": f"{provider}/{m['id']}",
+                    "modified_at": m.get("created", ""),
+                }
+            )
     return {"models": tags}
 
 
@@ -139,13 +141,15 @@ async def ollama_show(request: Request, payload: OllamaShowRequest) -> JSONRespo
     models = request.app.state.provider_models
     for m in models.get(provider, []):
         if m["id"] == upstream_model:
-            return JSONResponse(content={
-                "modelfile": "",
-                "parameters": "",
-                "template": "",
-                "details": {"family": provider, "format": "gguf"},
-                "model_info": m,
-            })
+            return JSONResponse(
+                content={
+                    "modelfile": "",
+                    "parameters": "",
+                    "template": "",
+                    "details": {"family": provider, "format": "gguf"},
+                    "model_info": m,
+                }
+            )
     return JSONResponse(
         status_code=404,
         content={"error": f"model '{model_name}' not found"},
@@ -287,18 +291,6 @@ async def _proxy_http_request(
             last_exc = None
         except httpx.TimeoutException as exception:
             last_exc = exception
-            if attempt < MAX_RETRIES:
-                delay = compute_delay(attempt, None)
-                LOGGER.warning(
-                    "Retry %d/%d for %s/%s after %.1fs (timeout)",
-                    attempt + 1,
-                    MAX_RETRIES,
-                    provider,
-                    upstream_model,
-                    delay,
-                )
-                await asyncio.sleep(delay)
-                continue
             break
         except httpx.HTTPError as exception:
             last_exc = exception
@@ -722,11 +714,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
         )
         return _error_response(status.HTTP_503_SERVICE_UNAVAILABLE, message, request_id)
     if not config.api_key:
-        detail = (
-            "GEMINI_API_KEY or GOOGLE_API_KEY is not set"
-            if provider == "gemini"
-            else f"{provider.upper()}_API_KEY is not set"
-        )
+        detail = "GEMINI_API_KEY or GOOGLE_API_KEY is not set" if provider == "gemini" else f"{provider.upper()}_API_KEY is not set"
         message = f"Provider {provider!r} is not configured"
         await record_trace(
             request_id=request_id,
@@ -786,18 +774,6 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             try:
                 response = await client.send(request_obj, stream=True)
             except httpx.TimeoutException:
-                if attempt < MAX_RETRIES:
-                    delay = compute_delay(attempt, None)
-                    LOGGER.warning(
-                        "Retry %d/%d for %s/%s after %.1fs (timeout)",
-                        attempt + 1,
-                        MAX_RETRIES,
-                        provider,
-                        upstream_model,
-                        delay,
-                    )
-                    await asyncio.sleep(delay)
-                    continue
                 await record_trace(
                     request_id=request_id,
                     provider=provider,
@@ -1079,11 +1055,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
         )
         return _error_response(status.HTTP_503_SERVICE_UNAVAILABLE, message, request_id)
     if not config.api_key:
-        detail = (
-            "GEMINI_API_KEY or GOOGLE_API_KEY is not set"
-            if provider == "gemini"
-            else f"{provider.upper()}_API_KEY is not set"
-        )
+        detail = "GEMINI_API_KEY or GOOGLE_API_KEY is not set" if provider == "gemini" else f"{provider.upper()}_API_KEY is not set"
         message = f"Provider {provider!r} is not configured"
         await record_trace(
             request_id=request_id,

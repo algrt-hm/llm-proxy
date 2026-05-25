@@ -19,10 +19,7 @@ PROVIDERS = (
 )
 DEFAULT_PROVIDER = getenv("LLM_PROXY_DEFAULT_PROVIDER", "openai").strip().lower()
 if DEFAULT_PROVIDER not in PROVIDERS:
-    raise ValueError(
-        f"LLM_PROXY_DEFAULT_PROVIDER={DEFAULT_PROVIDER!r} is not a recognised provider. "
-        f"Valid providers: {', '.join(PROVIDERS)}"
-    )
+    raise ValueError(f"LLM_PROXY_DEFAULT_PROVIDER={DEFAULT_PROVIDER!r} is not a recognised provider. Valid providers: {', '.join(PROVIDERS)}")
 DEFAULT_MODEL = getenv("LLM_PROXY_DEFAULT_MODEL", "deepseek/deepseek-v4-pro").strip()
 DEFAULT_BASE_URLS: dict[str, str] = {
     "openai": "https://api.openai.com/v1",

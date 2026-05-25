@@ -39,7 +39,7 @@ def _to_json(value: object | None) -> str | None:
         return None
     try:
         return json.dumps(value, ensure_ascii=True, separators=(",", ":"), default=str)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         LOGGER.warning("Failed to serialize value to JSON, storing repr", exc_info=True)
         return json.dumps({"_repr": repr(value)}, ensure_ascii=True, separators=(",", ":"))
 
