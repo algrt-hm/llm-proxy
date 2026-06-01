@@ -163,6 +163,13 @@ class RateLimiter:
         slot[1] = prompt_tokens
 
 
+ANTHROPIC_MODEL_LIMITS: dict[str, tuple[int, int]] = {
+    "claude-opus": (50, 500_000),
+    "claude-sonnet": (50, 30_000),
+    "claude-haiku": (50, 50_000),
+}
+
+
 class GeminiRateLimiter(RateLimiter):
     def __init__(self) -> None:
         super().__init__("Gemini", default_rpm=RPM, default_tpm=TPM)
@@ -175,4 +182,14 @@ class OpenAIRateLimiter(RateLimiter):
             default_rpm=5_000,
             default_tpm=800_000,
             model_limits=OPENAI_MODEL_LIMITS,
+        )
+
+
+class AnthropicRateLimiter(RateLimiter):
+    def __init__(self) -> None:
+        super().__init__(
+            "Anthropic",
+            default_rpm=50,
+            default_tpm=30_000,
+            model_limits=ANTHROPIC_MODEL_LIMITS,
         )

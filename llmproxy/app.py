@@ -41,7 +41,7 @@ from .providers import (
     get_provider_config,
     parse_model,
 )
-from .ratelimit import GeminiRateLimiter, OpenAIRateLimiter
+from .ratelimit import AnthropicRateLimiter, GeminiRateLimiter, OpenAIRateLimiter
 from .retry import (
     MAX_RETRIES,
     RETRYABLE_STATUSES,
@@ -60,10 +60,11 @@ from .utility import log_validation_results
 from .validation import ProviderStatus, get_or_validate
 from .constants import PACKAGE_NAME
 
-TIMEOUT_S = float(getenv("LLM_PROXY_TIMEOUT_S", "300"))
+TIMEOUT_S = float(getenv("LLM_PROXY_TIMEOUT_S", "900"))
 MAX_IDEMPOTENCY_KEY_LEN = 256
 LOGGER = logging.getLogger(PACKAGE_NAME)
 
+anthropic_rate_limiter = AnthropicRateLimiter()
 gemini_rate_limiter = GeminiRateLimiter()
 openai_rate_limiter = OpenAIRateLimiter()
 
@@ -265,6 +266,46 @@ def _is_cache_enabled(value: Any) -> bool:
     raise ValueError("Invalid 'cache' value. Expected boolean true/false (also accepts 1/0 or true/false strings).")
 
 
+def _inject_anthropic_cache_control(payload: dict) -> dict:
+    """Add cache_control breakpoints to messages for Anthropic prompt caching.
+
+    Marks up to two breakpoints:
+    1. The system/developer message (stable across turns).
+    2. The second-to-last message (caches conversation history).
+    """
+    messages = payload.get("messages")
+    if not messages:
+        return payload
+
+    # Shallow-copy each message dict so we don't mutate trace_payload.
+    messages = [dict(m) for m in messages]
+
+    def _mark(msg: dict) -> None:
+        content = msg.get("content")
+        if content is None:
+            return
+        if isinstance(content, str):
+            msg["content"] = [
+                {"type": "text", "text": content, "cache_control": {"type": "ephemeral"}}
+            ]
+        elif isinstance(content, list) and content:
+            last = dict(content[-1])
+            last["cache_control"] = {"type": "ephemeral"}
+            msg["content"] = content[:-1] + [last]
+
+    # Breakpoint 1: system/developer message
+    for msg in messages:
+        if msg.get("role") in ("system", "developer"):
+            _mark(msg)
+            break
+
+    # Breakpoint 2: penultimate message (conversation history)
+    if len(messages) >= 3:
+        _mark(messages[-2])
+
+    return {**payload, "messages": messages}
+
+
 async def _proxy_http_request(
     *,
     client: httpx.AsyncClient,
@@ -283,9 +324,12 @@ async def _proxy_http_request(
     last_retry_after = None
     last_exc: Exception | None = None
     openai_slot = None
+    anthropic_slot = None
     for attempt in range(MAX_RETRIES + 1):
         if provider == "openai":
             openai_slot = await openai_rate_limiter.acquire(upstream_model)
+        elif provider == "anthropic":
+            anthropic_slot = await anthropic_rate_limiter.acquire(upstream_model)
         try:
             response = await client.post(url, headers=headers, params=params, json=payload)
             last_exc = None
@@ -362,13 +406,16 @@ async def _proxy_http_request(
     else:
         response_payload = {"raw": response.text}
 
-    if openai_slot is not None:
+    if openai_slot is not None or anthropic_slot is not None:
         prompt_tokens = 0
         if isinstance(response_payload, dict):
             usage = response_payload.get("usage")
             if isinstance(usage, dict):
                 prompt_tokens = usage.get("prompt_tokens", 0)
-        openai_rate_limiter.record(openai_slot, prompt_tokens)
+        if openai_slot is not None:
+            openai_rate_limiter.record(openai_slot, prompt_tokens)
+        if anthropic_slot is not None:
+            anthropic_rate_limiter.record(anthropic_slot, prompt_tokens)
 
     await record_trace(
         request_id=request_id,
@@ -742,6 +789,8 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
         )
 
     outgoing_payload = trace_payload
+    if provider == "anthropic":
+        outgoing_payload = _inject_anthropic_cache_control(outgoing_payload)
 
     headers = {"Content-Type": "application/json"}
     auth_headers, auth_params = build_auth(config)
@@ -759,8 +808,11 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
         }
         # Streaming: retry on retryable status before streaming begins.
         openai_slot: list | None = None
+        anthropic_slot: list | None = None
         if provider == "openai":
             openai_slot = await openai_rate_limiter.acquire(upstream_model)
+        elif provider == "anthropic":
+            anthropic_slot = await anthropic_rate_limiter.acquire(upstream_model)
         response: httpx.Response | None = None
         last_retry_after: str | None = None
         for attempt in range(MAX_RETRIES + 1):
@@ -897,6 +949,8 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
                 prompt_tokens = (usage or {}).get("prompt_tokens", 0)
                 if openai_slot is not None:
                     openai_rate_limiter.record(openai_slot, prompt_tokens)
+                if anthropic_slot is not None:
+                    anthropic_rate_limiter.record(anthropic_slot, prompt_tokens)
                 await record_trace(
                     request_id=request_id,
                     provider=provider,
