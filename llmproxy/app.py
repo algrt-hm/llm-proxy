@@ -41,12 +41,13 @@ from .providers import (
     get_provider_config,
     parse_model,
 )
-from .ratelimit import AnthropicRateLimiter, GeminiRateLimiter, OpenAIRateLimiter
+from .ratelimit import AnthropicRateLimiter, GeminiRateLimiter, OpenAIRateLimiter, estimate_tokens
 from .retry import (
     MAX_RETRIES,
     RETRYABLE_STATUSES,
     compute_delay,
     parse_gemini_retry_after,
+    parse_retry_after,
 )
 from .schemas import ChatCompletionRequest, EmbeddingRequest, OllamaShowRequest
 from .tracing import (
@@ -318,6 +319,7 @@ async def _proxy_http_request(
     request_id: str,
     started: float,
     idempotency_key: str | None,
+    est_tokens: int = 0,
 ) -> JSONResponse:
     """Non-streaming HTTP POST with retry, response parsing, and trace recording."""
     response = None
@@ -327,9 +329,9 @@ async def _proxy_http_request(
     anthropic_slot = None
     for attempt in range(MAX_RETRIES + 1):
         if provider == "openai":
-            openai_slot = await openai_rate_limiter.acquire(upstream_model)
+            openai_slot = await openai_rate_limiter.acquire(upstream_model, est_tokens)
         elif provider == "anthropic":
-            anthropic_slot = await anthropic_rate_limiter.acquire(upstream_model)
+            anthropic_slot = await anthropic_rate_limiter.acquire(upstream_model, est_tokens)
         try:
             response = await client.post(url, headers=headers, params=params, json=payload)
             last_exc = None
@@ -356,6 +358,13 @@ async def _proxy_http_request(
         last_retry_after = response.headers.get("retry-after")
         if response.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
             delay = compute_delay(attempt, last_retry_after)
+            # Backpressure: block the rate limiter so queued requests wait.
+            if response.status_code == 429:
+                block_secs = parse_retry_after(last_retry_after) or delay
+                if provider == "openai":
+                    openai_rate_limiter.block_model(upstream_model, block_secs)
+                elif provider == "anthropic":
+                    anthropic_rate_limiter.block_model(upstream_model, block_secs)
             LOGGER.warning(
                 "Retry %d/%d for %s/%s after %.1fs (status=%d)",
                 attempt + 1,
@@ -807,12 +816,13 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             "stream_options": {"include_usage": True},
         }
         # Streaming: retry on retryable status before streaming begins.
+        est_toks = estimate_tokens(outgoing_payload)
         openai_slot: list | None = None
         anthropic_slot: list | None = None
         if provider == "openai":
-            openai_slot = await openai_rate_limiter.acquire(upstream_model)
+            openai_slot = await openai_rate_limiter.acquire(upstream_model, est_toks)
         elif provider == "anthropic":
-            anthropic_slot = await anthropic_rate_limiter.acquire(upstream_model)
+            anthropic_slot = await anthropic_rate_limiter.acquire(upstream_model, est_toks)
         response: httpx.Response | None = None
         last_retry_after: str | None = None
         for attempt in range(MAX_RETRIES + 1):
@@ -876,6 +886,12 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
             last_retry_after = response.headers.get("retry-after")
             if response.status_code in RETRYABLE_STATUSES and attempt < MAX_RETRIES:
                 delay = compute_delay(attempt, last_retry_after)
+                if response.status_code == 429:
+                    block_secs = parse_retry_after(last_retry_after) or delay
+                    if provider == "openai":
+                        openai_rate_limiter.block_model(upstream_model, block_secs)
+                    elif provider == "anthropic":
+                        anthropic_rate_limiter.block_model(upstream_model, block_secs)
                 LOGGER.warning(
                     "Retry %d/%d for %s/%s after %.1fs (status=%d)",
                     attempt + 1,
@@ -982,6 +998,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
         request_id=request_id,
         started=started,
         idempotency_key=idempotency_key,
+        est_tokens=estimate_tokens(outgoing_payload),
     )
 
 

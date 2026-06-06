@@ -61,6 +61,9 @@ class RateLimiter:
         # model -> asyncio.Lock
         self._locks: dict[str, asyncio.Lock] = {}
         self._last_eviction: float = time.monotonic()
+        # model -> monotonic timestamp until which acquire() must wait
+        # (set by block_model after upstream 429)
+        self._blocked_until: dict[str, float] = {}
 
     def _limits_for(self, model: str) -> tuple[int, int]:
         """Return ``(rpm, tpm)`` for *model*.
@@ -104,12 +107,32 @@ class RateLimiter:
             del self._windows[m]
             self._locks.pop(m, None)
 
-    async def acquire(self, model: str) -> list[float | int]:
+    def block_model(self, model: str, seconds: float) -> None:
+        """Block *model* for *seconds* after an upstream 429.
+
+        All pending ``acquire()`` calls for *model* will wait until the
+        block expires.  If a longer block is already active it is kept.
+        """
+        until = time.monotonic() + seconds
+        current = self._blocked_until.get(model, 0)
+        self._blocked_until[model] = max(current, until)
+        LOGGER.info(
+            "%s backpressure: model=%s blocked for %.1fs",
+            self.provider,
+            model,
+            seconds,
+        )
+
+    async def acquire(self, model: str, estimated_tokens: int = 0) -> list[float | int]:
         """Wait until rate limits allow a new request, then reserve a slot.
 
-        Returns a mutable ``[timestamp, 0]`` slot already appended to the
-        window.  The caller should later call :meth:`record` to fill in the
-        actual prompt-token count.
+        *estimated_tokens* is a rough pre-send token estimate used for the
+        TPM check so that concurrent requests don't all bypass the limit.
+        The caller should later call :meth:`record` to fill in the actual
+        prompt-token count.
+
+        Returns a mutable ``[timestamp, estimated_tokens]`` slot already
+        appended to the window.
         """
         lock = self._get_lock(model)
         window = self._get_window(model)
@@ -121,18 +144,23 @@ class RateLimiter:
                 self._purge(window, now)
                 self._maybe_evict(now, exclude=model)
 
+                sleep_time = 0.0
+
+                # Backpressure: upstream 429 blocked this model.
+                blocked_until = self._blocked_until.get(model, 0)
+                if now < blocked_until:
+                    sleep_time = blocked_until - now
+
                 rpm = len(window)
                 tpm = sum(int(s[1]) for s in window)
-
-                sleep_time = 0.0
 
                 if rpm >= rpm_limit:
                     # Wait until oldest entry expires
                     sleep_time = max(sleep_time, window[0][0] - (now - WINDOW))
 
-                if tpm >= tpm_limit:
+                if tpm + estimated_tokens >= tpm_limit:
                     # Walk entries to find when enough tokens expire
-                    remaining = tpm - tpm_limit
+                    remaining = tpm + estimated_tokens - tpm_limit
                     for s in window:
                         remaining -= int(s[1])
                         if remaining < 0:
@@ -140,18 +168,19 @@ class RateLimiter:
                             break
 
                 if sleep_time <= 0:
-                    slot: list[float | int] = [now, 0]
+                    slot: list[float | int] = [now, estimated_tokens]
                     window.append(slot)
                     return slot
 
                 LOGGER.info(
-                    "%s rate limit: model=%s waiting %.1fs (rpm=%d/%d tpm=%d/%d)",
+                    "%s rate limit: model=%s waiting %.1fs (rpm=%d/%d tpm=%d+%d/%d)",
                     self.provider,
                     model,
                     sleep_time,
                     rpm,
                     rpm_limit,
                     tpm,
+                    estimated_tokens,
                     tpm_limit,
                 )
 
@@ -193,3 +222,21 @@ class AnthropicRateLimiter(RateLimiter):
             default_tpm=30_000,
             model_limits=ANTHROPIC_MODEL_LIMITS,
         )
+
+
+def estimate_tokens(payload: dict) -> int:
+    """Rough token estimate from message content (~4 chars per token).
+
+    Good enough for pre-checking TPM budgets in the rate limiter so
+    concurrent requests don't all bypass the limit simultaneously.
+    """
+    total_chars = 0
+    for msg in payload.get("messages", []):
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            total_chars += len(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict):
+                    total_chars += len(part.get("text", ""))
+    return max(1, total_chars // 4)

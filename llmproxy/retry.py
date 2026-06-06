@@ -1,4 +1,5 @@
 import logging
+import random
 import re
 from email.utils import parsedate_to_datetime
 from os import getenv
@@ -8,7 +9,7 @@ from .constants import PACKAGE_NAME
 RETRYABLE_STATUSES = {429, 502, 503, 504}
 MAX_RETRIES = int(getenv("LLM_PROXY_MAX_RETRIES", "2"))
 RETRY_BASE_DELAY_S = float(getenv("LLM_PROXY_RETRY_BASE_DELAY_S", "1.0"))
-MAX_DELAY_S = 30.0
+MAX_BACKOFF_S = 30.0
 LOGGER = logging.getLogger(PACKAGE_NAME)
 
 _GEMINI_RETRY_PATTERNS = (
@@ -56,10 +57,11 @@ def parse_gemini_retry_after(error: Exception | str | None) -> float | None:
 
 
 def compute_delay(attempt: int, retry_after: str | None) -> float:
-    backoff = RETRY_BASE_DELAY_S * (2**attempt)
+    backoff = min(RETRY_BASE_DELAY_S * (2**attempt), MAX_BACKOFF_S)
+    jitter = random.uniform(0, backoff * 0.25)
     parsed = parse_retry_after(retry_after)
     if parsed is not None:
-        delay = max(parsed, backoff)
-    else:
-        delay = backoff
-    return min(delay, MAX_DELAY_S)
+        # Respect upstream retry-after without capping — the server knows
+        # its own rate-limit window better than we do.
+        return parsed + jitter
+    return backoff + jitter

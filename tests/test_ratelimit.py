@@ -13,6 +13,7 @@ from llmproxy.ratelimit import (
     OpenAIRateLimiter,
     RateLimiter,
     _EVICT_INTERVAL,
+    estimate_tokens,
 )
 
 
@@ -369,4 +370,124 @@ async def test_per_model_tpm_blocking():
     slot = await lim.acquire("small-model")
     elapsed = time.monotonic() - start
     assert elapsed >= 0.05
+    assert slot is not None
+
+
+# --- Token estimation ---
+
+
+def test_estimate_tokens_string_content():
+    payload = {"messages": [{"role": "user", "content": "a" * 400}]}
+    assert estimate_tokens(payload) == 100
+
+
+def test_estimate_tokens_list_content():
+    payload = {
+        "messages": [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "b" * 800}],
+            }
+        ]
+    }
+    assert estimate_tokens(payload) == 200
+
+
+def test_estimate_tokens_empty():
+    assert estimate_tokens({}) == 1
+    assert estimate_tokens({"messages": []}) == 1
+
+
+# --- Estimated tokens in acquire ---
+
+
+@pytest.mark.asyncio
+async def test_acquire_estimated_tokens_blocks_tpm():
+    """A large estimated_tokens should block when budget is tight."""
+    lim = RateLimiter("test", default_rpm=10_000, default_tpm=1000)
+    window = lim._get_window("m")
+    now = time.monotonic()
+    # 800 tokens already in window, not yet expired
+    window.append([now - WINDOW + 0.1, 800])
+
+    start = time.monotonic()
+    # Requesting 300 estimated tokens: 800 + 300 >= 1000, must wait
+    slot = await lim.acquire("m", estimated_tokens=300)
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.05
+    assert slot is not None
+
+
+@pytest.mark.asyncio
+async def test_acquire_estimated_tokens_passes_when_room():
+    """Estimated tokens should pass immediately when there's budget."""
+    lim = RateLimiter("test", default_rpm=10_000, default_tpm=1000)
+
+    start = time.monotonic()
+    slot = await lim.acquire("m", estimated_tokens=500)
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.5
+    assert slot[1] == 500
+
+
+@pytest.mark.asyncio
+async def test_acquire_estimated_tokens_serializes_concurrent():
+    """Two concurrent requests with large estimates should serialize."""
+    lim = RateLimiter("test", default_rpm=10_000, default_tpm=1000)
+
+    # First acquire takes 600 estimated tokens
+    slot1 = await lim.acquire("m", estimated_tokens=600)
+    assert slot1[1] == 600
+
+    # Second acquire with 600 estimated: 600 + 600 >= 1000, must wait
+    window = lim._get_window("m")
+    # Make the first slot expire soon
+    slot1[0] = time.monotonic() - WINDOW + 0.1
+
+    start = time.monotonic()
+    slot2 = await lim.acquire("m", estimated_tokens=600)
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.05
+    assert slot2 is not None
+
+
+# --- Backpressure (block_model) ---
+
+
+@pytest.mark.asyncio
+async def test_block_model_delays_acquire():
+    """block_model should make acquire() wait until block expires."""
+    lim = RateLimiter("test", default_rpm=10_000, default_tpm=10_000_000)
+    lim.block_model("m", 0.15)
+
+    start = time.monotonic()
+    slot = await lim.acquire("m")
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.1
+    assert slot is not None
+
+
+@pytest.mark.asyncio
+async def test_block_model_longer_block_wins():
+    """A longer block should override a shorter one."""
+    lim = RateLimiter("test", default_rpm=10_000, default_tpm=10_000_000)
+    lim.block_model("m", 0.1)
+    lim.block_model("m", 0.25)
+
+    start = time.monotonic()
+    await lim.acquire("m")
+    elapsed = time.monotonic() - start
+    assert elapsed >= 0.2
+
+
+@pytest.mark.asyncio
+async def test_block_model_does_not_affect_other_models():
+    """Blocking one model should not affect another."""
+    lim = RateLimiter("test", default_rpm=10_000, default_tpm=10_000_000)
+    lim.block_model("blocked-model", 10.0)
+
+    start = time.monotonic()
+    slot = await lim.acquire("free-model")
+    elapsed = time.monotonic() - start
+    assert elapsed < 0.5
     assert slot is not None
