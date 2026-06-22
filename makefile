@@ -33,10 +33,10 @@ CHEAP_CEREBRAS_MODEL = llama3.1-8b
 CHEAP_ANTHROPIC_MODEL = claude-3-haiku-20240307
 CHEAP_DEEPSEEK_MODEL = deepseek-chat
 
-run:
-	LLM_PROXY_PORT=6969 uv run python main.py
+run-sqlite:
+	LLM_PROXY_PORT=6969 nice -n20 uv run python main.py
 
-run-alt-postgres:
+run:
 	@if [ -z "$$LLM_PROXY_DATABASE_URL" ]; then echo "LLM_PROXY_DATABASE_URL is not set"; exit 1; fi
 	LLM_PROXY_RUN_ALT_POSTGRES=1 LLM_PROXY_PORT=6969 LLM_PROXY_DB_URL=$$(echo "$$LLM_PROXY_DATABASE_URL" | sed 's|^postgresql\(+[a-z]*\)\?://|postgresql+asyncpg://|') nice -n20 uv run python main.py 2>&1 | tee llm-proxy-alt.log
 
