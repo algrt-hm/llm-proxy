@@ -49,7 +49,13 @@ Optional auth overrides are available per provider:
 - <PROVIDER>_AUTH_PREFIX (default: Bearer)
 - <PROVIDER>_AUTH_QUERY (send API key as a query param instead)
 
-Inbound authentication is not implemented; this is intended for internal use.
+Inbound authentication is not implemented; this is intended for internal use. Accordingly:
+
+> Do not expose this to the internet. Inbound authentication is
+> not implemented and the default bind address is `0.0.0.0`. Anyone who can reach
+> the server can spend your upstream API credits and read the request/response
+> traces stored in the database. Run it only on a trusted network (e.g. `localhost`
+> or a private/VPN interface), or place an authenticating reverse proxy in front.
 
 ## Runtime environment variables
 
@@ -153,7 +159,7 @@ Pages: Dashboard (`/`), Traces (`/traces` — split-pane with inline detail), Ca
 ├─ main.py                  # Uvicorn entrypoint for llmproxy.app:app
 ├─ pyproject.toml           # Dependencies + project metadata
 ├─ README.md                # Usage + env configuration
-├─ uv.lock                  # Resolved dependency lockfile
+├─ uv.lock                  # Resolved dependency lockfile (gitignored, local only)
 ├─ scripts/
 │  ├─ ping_providers.py     # Smoke tests against local proxy
 │  ├─ stop.sh               # Kill running llm-proxy instance by port
