@@ -117,6 +117,30 @@ The server binds to `0.0.0.0` by default, so it is accessible to other machines 
 For OpenAI-compatible clients on the same network, use `http://<LAN_IP>:6969/v1` as the base URL (no API key required).
 Clients that probe for Ollama or llama.cpp endpoints (e.g. Open WebUI) will also work — the proxy responds to `/api/tags`, `/api/show`, `/api/v1/models`, `/version`, and `/props`.
 
+## Running as a systemd service
+
+The proxy runs as a systemd **user** service (no root required), configured for the Postgres backend on port `6969`:
+
+- Unit file: `~/.config/systemd/user/llm-proxy.service`
+- Environment file: `~/.config/llm-proxy/env` (mode `600`; provider API keys plus `LLM_PROXY_DB_URL`, `LLM_PROXY_PORT`, `LLM_PROXY_RUN_ALT_POSTGRES`)
+- Lingering is enabled (`loginctl enable-linger`), so the service starts at boot without a login
+
+Useful commands:
+
+```bash
+systemctl --user status llm-proxy     # check state
+systemctl --user restart llm-proxy    # restart (e.g. after a code change or key rotation)
+systemctl --user stop llm-proxy       # stop
+systemctl --user start llm-proxy      # start
+journalctl --user -u llm-proxy -f     # follow logs (replaces llm-proxy-alt.log)
+journalctl --user -u llm-proxy -n 100 # last 100 log lines
+```
+
+After editing the unit file, run `systemctl --user daemon-reload` before restarting.
+After rotating an API key, edit `~/.config/llm-proxy/env` and restart the service.
+
+Note: when the service is running it holds port `6969`, so stop it first (`systemctl --user stop llm-proxy`) before starting a foreground instance with `make run`.
+
 ## Provider checks
 
 - `make ping-providers` (proxy chat smoke test; uses credits)
