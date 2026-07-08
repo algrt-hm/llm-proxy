@@ -276,6 +276,194 @@ async def test_idempotency_rejects_embedding_response_on_chat_endpoint(monkeypat
     assert "not configured" in body["error"]["message"]
 
 
+# --- Idempotency payload mismatch rejection ---
+
+
+@pytest.mark.asyncio
+async def test_idempotency_payload_mismatch_returns_409(monkeypatch):
+    """Reusing an Idempotency-Key with a different payload must 409, not serve the old response."""
+    captured: dict[str, object] = {}
+
+    async def fake_record_trace(**kwargs):
+        captured.update(kwargs)
+        return None
+
+    async def fake_lookup_idempotency(key, *, provider, model):  # noqa: ARG001
+        return SimpleNamespace(
+            id=99,
+            request_id="old-req-id",
+            status_code=200,
+            response_json=json.dumps({"id": "chatcmpl-old", "object": "chat.completion"}),
+            cache_key="fingerprint-of-a-different-payload",
+        )
+
+    monkeypatch.setattr(app_module, "record_trace", fake_record_trace)
+    monkeypatch.setattr(app_module, "lookup_idempotency", fake_lookup_idempotency)
+
+    payload = ChatCompletionRequest(
+        model="openai/gpt-4o-mini",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    req = _build_request(headers={"idempotency-key": "job-42"})
+    response = await app_module.chat_completions(req, payload)
+    body = json.loads(response.body)
+
+    assert response.status_code == 409
+    assert "already used with a different request payload" in body["error"]["message"]
+    assert captured["status_code"] == 409
+
+
+@pytest.mark.asyncio
+async def test_idempotency_payload_match_serves_cached(monkeypatch):
+    """Same Idempotency-Key with the same payload fingerprint is served from cache."""
+
+    async def fake_record_trace(**kwargs):  # noqa: ARG001
+        return None
+
+    async def fake_record_cache_hit(**kwargs):  # noqa: ARG001
+        return None
+
+    matching_key = _build_cache_key(
+        provider="openai",
+        model="gpt-4o-mini",
+        request_payload={
+            "model": "gpt-4o-mini",
+            "messages": [{"role": "user", "content": "hello"}],
+            "stream": False,
+        },
+    )
+
+    async def fake_lookup_idempotency(key, *, provider, model):  # noqa: ARG001
+        return SimpleNamespace(
+            id=99,
+            request_id="old-req-id",
+            status_code=200,
+            response_json=json.dumps({"id": "chatcmpl-old", "object": "chat.completion"}),
+            cache_key=matching_key,
+        )
+
+    monkeypatch.setattr(app_module, "record_trace", fake_record_trace)
+    monkeypatch.setattr(app_module, "record_cache_hit", fake_record_cache_hit)
+    monkeypatch.setattr(app_module, "lookup_idempotency", fake_lookup_idempotency)
+
+    payload = ChatCompletionRequest(
+        model="openai/gpt-4o-mini",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    req = _build_request(headers={"idempotency-key": "job-42"})
+    response = await app_module.chat_completions(req, payload)
+    body = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert response.headers["x-idempotency"] == "cached"
+    assert body["id"] == "chatcmpl-old"
+
+
+@pytest.mark.asyncio
+async def test_idempotency_legacy_trace_without_fingerprint_is_served(monkeypatch):
+    """Traces recorded before cache_key existed (None) can't be checked and are served."""
+
+    async def fake_record_trace(**kwargs):  # noqa: ARG001
+        return None
+
+    async def fake_record_cache_hit(**kwargs):  # noqa: ARG001
+        return None
+
+    async def fake_lookup_idempotency(key, *, provider, model):  # noqa: ARG001
+        return SimpleNamespace(
+            id=99,
+            request_id="legacy-req-id",
+            status_code=200,
+            response_json=json.dumps({"id": "chatcmpl-legacy", "object": "chat.completion"}),
+            cache_key=None,
+        )
+
+    monkeypatch.setattr(app_module, "record_trace", fake_record_trace)
+    monkeypatch.setattr(app_module, "record_cache_hit", fake_record_cache_hit)
+    monkeypatch.setattr(app_module, "lookup_idempotency", fake_lookup_idempotency)
+
+    payload = ChatCompletionRequest(
+        model="openai/gpt-4o-mini",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    req = _build_request(headers={"idempotency-key": "job-42"})
+    response = await app_module.chat_completions(req, payload)
+
+    assert response.status_code == 200
+    assert response.headers["x-idempotency"] == "cached"
+
+
+@pytest.mark.asyncio
+async def test_idempotency_payload_mismatch_returns_409_on_embeddings(monkeypatch):
+    """Embeddings endpoint applies the same payload-mismatch rejection."""
+
+    async def fake_record_trace(**kwargs):  # noqa: ARG001
+        return None
+
+    async def fake_lookup_idempotency(key, *, provider, model):  # noqa: ARG001
+        return SimpleNamespace(
+            id=99,
+            request_id="old-emb-id",
+            status_code=200,
+            response_json=json.dumps({"object": "list", "data": []}),
+            cache_key="fingerprint-of-a-different-payload",
+        )
+
+    monkeypatch.setattr(app_module, "record_trace", fake_record_trace)
+    monkeypatch.setattr(app_module, "lookup_idempotency", fake_lookup_idempotency)
+
+    payload = EmbeddingRequest(model="openai/text-embedding-3-small", input="hello")
+    req = _build_request(headers={"idempotency-key": "job-42"}, path="/v1/embeddings")
+    response = await app_module.embeddings(req, payload)
+    body = json.loads(response.body)
+
+    assert response.status_code == 409
+    assert "already used with a different request payload" in body["error"]["message"]
+
+
+@pytest.mark.asyncio
+async def test_anthropic_idempotency_match_uses_injected_payload(monkeypatch):
+    """Anthropic fingerprints are computed from the payload as sent upstream (with
+    injected cache_control), so a legitimate retry matches the stored trace."""
+
+    async def fake_record_trace(**kwargs):  # noqa: ARG001
+        return None
+
+    async def fake_record_cache_hit(**kwargs):  # noqa: ARG001
+        return None
+
+    trace_payload = {
+        "model": "claude-x",
+        "messages": [{"role": "user", "content": "hello"}],
+        "stream": False,
+    }
+    injected = app_module._inject_anthropic_cache_control(trace_payload)
+    matching_key = _build_cache_key(provider="anthropic", model="claude-x", request_payload=injected)
+
+    async def fake_lookup_idempotency(key, *, provider, model):  # noqa: ARG001
+        return SimpleNamespace(
+            id=99,
+            request_id="anthropic-req-id",
+            status_code=200,
+            response_json=json.dumps({"id": "chatcmpl-anthropic", "object": "chat.completion"}),
+            cache_key=matching_key,
+        )
+
+    monkeypatch.setattr(app_module, "record_trace", fake_record_trace)
+    monkeypatch.setattr(app_module, "record_cache_hit", fake_record_cache_hit)
+    monkeypatch.setattr(app_module, "lookup_idempotency", fake_lookup_idempotency)
+
+    payload = ChatCompletionRequest(
+        model="anthropic/claude-x",
+        messages=[{"role": "user", "content": "hello"}],
+    )
+    req = _build_request(headers={"idempotency-key": "job-42"})
+    response = await app_module.chat_completions(req, payload)
+
+    assert response.status_code == 200
+    assert response.headers["x-idempotency"] == "cached"
+
+
 # --- Response cache cross-endpoint rejection ---
 
 

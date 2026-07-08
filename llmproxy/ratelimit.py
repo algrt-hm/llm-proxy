@@ -2,10 +2,23 @@ import asyncio
 import logging
 import time
 from collections import deque
+from os import getenv
 
 from .constants import PACKAGE_NAME
 
 LOGGER = logging.getLogger(PACKAGE_NAME)
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        LOGGER.warning("Invalid %s=%r, using default %d", name, raw, default)
+        return default
+
 
 RPM = 22  # ~10% below Gemini free-tier limit (25 RPM)
 TPM = 900_000  # ~10% below Gemini free-tier limit (1M TPM)
@@ -98,14 +111,22 @@ class RateLimiter:
             window.popleft()
 
     def _maybe_evict(self, now: float, *, exclude: str) -> None:
-        """Periodically remove models whose windows are empty."""
+        """Periodically remove models whose windows are empty.
+
+        Skips models whose lock is currently held: a coroutine inside
+        ``acquire()`` for that model still references the old lock/window
+        objects, and evicting them would orphan its bookkeeping.
+        """
         if now - self._last_eviction < _EVICT_INTERVAL:
             return
         self._last_eviction = now
-        stale = [m for m, w in self._windows.items() if not w and m != exclude]
+        stale = [m for m, w in self._windows.items() if not w and m != exclude and not (m in self._locks and self._locks[m].locked())]
         for m in stale:
             del self._windows[m]
             self._locks.pop(m, None)
+        expired_blocks = [m for m, until in self._blocked_until.items() if until <= now]
+        for m in expired_blocks:
+            del self._blocked_until[m]
 
     def block_model(self, model: str, seconds: float) -> None:
         """Block *model* for *seconds* after an upstream 429.
@@ -134,11 +155,13 @@ class RateLimiter:
         Returns a mutable ``[timestamp, estimated_tokens]`` slot already
         appended to the window.
         """
-        lock = self._get_lock(model)
-        window = self._get_window(model)
         rpm_limit, tpm_limit = self._limits_for(model)
 
         while True:
+            # Re-fetch each iteration: eviction may have replaced the lock and
+            # window objects while we slept outside the lock.
+            lock = self._get_lock(model)
+            window = self._get_window(model)
             async with lock:
                 now = time.monotonic()
                 self._purge(window, now)
@@ -192,10 +215,13 @@ class RateLimiter:
         slot[1] = prompt_tokens
 
 
+# Tier-dependent Anthropic limits; override via env when the account tier changes.
+ANTHROPIC_RPM = _int_env("LLM_PROXY_ANTHROPIC_RPM", 50)
+ANTHROPIC_TPM = _int_env("LLM_PROXY_ANTHROPIC_TPM", 30_000)
 ANTHROPIC_MODEL_LIMITS: dict[str, tuple[int, int]] = {
-    "claude-opus": (50, 500_000),
-    "claude-sonnet": (50, 30_000),
-    "claude-haiku": (50, 50_000),
+    "claude-opus": (ANTHROPIC_RPM, _int_env("LLM_PROXY_ANTHROPIC_OPUS_TPM", 500_000)),
+    "claude-sonnet": (ANTHROPIC_RPM, _int_env("LLM_PROXY_ANTHROPIC_SONNET_TPM", 30_000)),
+    "claude-haiku": (ANTHROPIC_RPM, _int_env("LLM_PROXY_ANTHROPIC_HAIKU_TPM", 50_000)),
 }
 
 
@@ -218,8 +244,8 @@ class AnthropicRateLimiter(RateLimiter):
     def __init__(self) -> None:
         super().__init__(
             "Anthropic",
-            default_rpm=50,
-            default_tpm=30_000,
+            default_rpm=ANTHROPIC_RPM,
+            default_tpm=ANTHROPIC_TPM,
             model_limits=ANTHROPIC_MODEL_LIMITS,
         )
 
