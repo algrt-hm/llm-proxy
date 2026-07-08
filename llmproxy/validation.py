@@ -113,7 +113,11 @@ async def _validate_http(
 
 
 async def _validate_perplexity(client: httpx.AsyncClient, config: ProviderConfig) -> ProviderStatus:
-    """Check Perplexity API working. Note that Perplexity can sometimes give a 404 if the base URL includes a path (e.g. from an old config) even if the root URL is correct, so if we get a 404 we also try again with just the root URL as a fallback
+    """Check the Perplexity API key works.
+
+    Perplexity's chat base URL may include a version path (e.g. `/v2`), but the
+    free/read-only async job-listing endpoint used for validation lives at the
+    API root only, so probe the root origin derived from the configured base URL.
 
     Args:
         client (httpx.AsyncClient): HTTP client to use for request
@@ -123,40 +127,15 @@ async def _validate_perplexity(client: httpx.AsyncClient, config: ProviderConfig
         ProviderStatus: instantiation
     """
 
-    # OK or no 404, good
-    result = await _validate_http(client, config, "async/chat/completions")
-    if result.ok or not result.detail.startswith("404 "):
-        return result
-
-    # No base url?
     if not config.base_url:
-        # We don't e.g.
-        # raise ValueError("missing base URL")
-        # because we don't want to trash the async loop
-        return result
+        return ProviderStatus(ok=False, detail="missing base URL")
 
     url = URL(config.base_url)
-
-    # Attempt to check base_url
     if not url.scheme or not url.host:
-        return result
+        return ProviderStatus(ok=False, detail=f"invalid base URL: {config.base_url}")
 
-    # This checks whether the root origin is the same as the already-configured base URL (ignoring trailing slashes)
-    # If they're equal, there's no point retrying — the fallback URL would be identical to what already failed — so return 404
-    root_base_url = url.origin().human_repr()
-    if root_base_url.rstrip("/") == config.base_url.rstrip("/"):
-        return result
-
-    # Try again with root URL as a fallback, in case the 404 is due to an extra path in the base URL
-    fallback_config = config.model_copy(update={"base_url": root_base_url})
-    fallback = await _validate_http(client, fallback_config, "async/chat/completions")
-
-    # All good
-    if fallback.ok:
-        return ProviderStatus(ok=True, detail=f"{fallback.detail} (root-host fallback)")
-
-    # Return status from fallback config in any event
-    return fallback
+    root_config = config.model_copy(update={"base_url": url.origin().human_repr()})
+    return await _validate_http(client, root_config, "async/chat/completions")
 
 
 async def validate_provider(

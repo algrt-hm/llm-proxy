@@ -66,12 +66,17 @@ Inbound authentication is not implemented; this is intended for internal use. Ac
 | `LLM_PROXY_RELOAD` | off | Enable dev auto-reload (`1`, `true`, or `yes`) |
 | `LLM_PROXY_DEFAULT_PROVIDER` | `openai` | Provider used when model has no prefix |
 | `LLM_PROXY_DEFAULT_MODEL` | `deepseek/deepseek-v4-pro` | Model (with optional provider prefix) used when `model` field is omitted or empty |
-| `LLM_PROXY_TIMEOUT_S` | `300` | HTTP request timeout (seconds) |
+| `LLM_PROXY_TIMEOUT_S` | `900` | HTTP request timeout (seconds) |
 | `LLM_PROXY_DB_URL` | `sqlite+aiosqlite:///./llmproxy.db` | SQLAlchemy database URL (SQLite 3.35+ and Postgres supported, e.g. `postgresql+asyncpg://user:pass@localhost/llmproxy`) |
 | `LLM_PROXY_MAX_RETRIES` | `2` | Max retry attempts on transient upstream errors (429, 502, 503, 504) |
 | `LLM_PROXY_RETRY_BASE_DELAY_S` | `1.0` | Base backoff delay (seconds); baseline delay is `base * 2^attempt` (capped at 30s inside shared retry helper) |
 | `LLM_PROXY_MODELS_CACHE` | `./llmproxy_models.json` | Path to cached model lists (re-fetches after 24h) |
-| `LLM_PROXY_DATABASE_URL` | — | Postgres connection string used by the web frontend and `make run-alt-postgres`/`make stats-postgres` (plain `postgresql://`, e.g. `postgresql://postgres@myhost/llm-proxy`) |
+| `LLM_PROXY_DATABASE_URL` | — | Postgres connection string used by the web frontend and `make run`/`make stats-postgres` (plain `postgresql://`, e.g. `postgresql://postgres@myhost/llm-proxy`) |
+| `LLM_PROXY_ANTHROPIC_RPM` | `50` | Anthropic client-side rate limiter: requests/minute (all models) |
+| `LLM_PROXY_ANTHROPIC_TPM` | `30000` | Anthropic limiter: input tokens/minute for model families without a specific override |
+| `LLM_PROXY_ANTHROPIC_OPUS_TPM` | `500000` | Anthropic limiter: input tokens/minute for `claude-opus*` models |
+| `LLM_PROXY_ANTHROPIC_SONNET_TPM` | `30000` | Anthropic limiter: input tokens/minute for `claude-sonnet*` models |
+| `LLM_PROXY_ANTHROPIC_HAIKU_TPM` | `50000` | Anthropic limiter: input tokens/minute for `claude-haiku*` models |
 
 Full tracing is recorded to the database. Database interaction uses SQLAlchemy so the backend can be swapped (e.g. SQLite to Postgres).
 
@@ -80,7 +85,7 @@ Full tracing is recorded to the database. Database interaction uses SQLAlchemy s
 - Retryable upstream conditions: HTTP status `429/502/503/504` and connection errors. Timeout exceptions are **not retried** (fails immediately with 504).
 - Default retry count: `LLM_PROXY_MAX_RETRIES=2` (up to 3 total attempts).
 - Baseline delay is exponential backoff: `LLM_PROXY_RETRY_BASE_DELAY_S * 2^attempt`.
-- HTTP providers: `Retry-After` header is parsed and delay uses `max(retry_after, backoff)` through the shared helper.
+- HTTP providers: when upstream sends a `Retry-After` header it is respected as-is (plus jitter, uncapped — the server knows its own rate-limit window); otherwise exponential backoff with jitter is used.
 - Gemini SDK (non-streaming chat + embeddings): retries are exception-driven and now parse retry hints from SDK error text (for example `Please retry in 53s` or `retryDelay: '53s'`). When present, the proxy waits at least that hinted duration before retrying.
 - Gemini streaming requests are not retried.
 
@@ -94,6 +99,14 @@ Full tracing is recorded to the database. Database interaction uses SQLAlchemy s
 - Streaming responses are not served from cache (the `stream` flag is part of the cache key, so streaming and non-streaming requests never collide).
 - Degenerate chat completions (all choices have null or empty content) are not served from cache, preventing cache poisoning from flaky provider responses.
 - Cache hits (both response and idempotency) are logged to a `cache_hits` table for observability.
+- There is deliberately no TTL: identical requests are served from cache indefinitely (use `cache: false` to bypass).
+
+## Idempotency
+
+- Send an `Idempotency-Key` header (max 256 chars) on `POST /v1/chat/completions` (non-streaming) or `POST /v1/embeddings` for retry safety: repeating a request with the same key returns the stored response (`x-idempotency: cached` header) instead of hitting the provider again.
+- Keys are scoped to `(key, provider, model)`, and only successful (2xx) responses are replayed.
+- Reusing a key with a **different request payload** returns `409 Conflict` (Stripe-style) rather than silently serving the previous response. The check compares the request fingerprint (`cache_key`) stored on the trace; traces recorded before fingerprints existed are served without the check.
+- Anthropic fingerprints are computed from the payload as sent upstream (i.e. including the injected prompt-caching `cache_control` breakpoints), matching what is recorded in traces.
 
 ## Streaming
 
@@ -109,8 +122,8 @@ Full tracing is recorded to the database. Database interaction uses SQLAlchemy s
 
 ## Running locally
 
-- `make run` (port `6969`, SQLite DB)
-- `make run-alt-postgres` (port `6969`, Postgres DB via `LLM_PROXY_DATABASE_URL`, runs at low CPU priority via `nice -n20`)
+- `make run` (port `6969`, Postgres DB via `LLM_PROXY_DATABASE_URL`, runs at low CPU priority via `nice -n20`)
+- `make run-sqlite` (port `6969`, SQLite DB, runs at low CPU priority via `nice -n20`)
 - `uv run python main.py --require-db-url` (fail fast if `LLM_PROXY_DB_URL` is unset)
 
 The server binds to `0.0.0.0` by default, so it is accessible to other machines on the LAN.
@@ -179,7 +192,7 @@ Pages: Dashboard (`/`), Traces (`/traces` — split-pane with inline detail), Ca
 ├─ .gitignore               # Git ignore rules
 ├─ .python-version          # Python version pin
 ├─ CLAUDE.md                # Agent notes (gitignored, local only)
-├─ makefile                 # Developer tasks (help/run/run-alt-postgres/stop/ping/validate/format/lint/test/stats-sqlite/stats-postgres/install-web/dev-web/build-web/lint-web)
+├─ makefile                 # Developer tasks (help/run/run-sqlite/stop/ping/validate/format/lint/test/stats-sqlite/stats-postgres/install-web/dev-web/build-web/lint-web)
 ├─ main.py                  # Uvicorn entrypoint for llmproxy.app:app
 ├─ pyproject.toml           # Dependencies + project metadata
 ├─ README.md                # Usage + env configuration

@@ -13,11 +13,15 @@ dependencies = [
     "pydantic",
     "google-genai>=1.69.0",
     "greenlet",
+    "asyncpg>=0.31.0",
+    "yarl>=1.23.0",
+]
+
+[dependency-groups]
+dev = [
     "ruff>=0.14.14",
     "pytest",
     "pytest-asyncio",
-    "asyncpg>=0.31.0",
-    "yarl>=1.23.0",
 ]
 
 [tool.pytest.ini_options]

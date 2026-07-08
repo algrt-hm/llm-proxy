@@ -440,7 +440,6 @@ async def test_acquire_estimated_tokens_serializes_concurrent():
     assert slot1[1] == 600
 
     # Second acquire with 600 estimated: 600 + 600 >= 1000, must wait
-    window = lim._get_window("m")
     # Make the first slot expire soon
     slot1[0] = time.monotonic() - WINDOW + 0.1
 
