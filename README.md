@@ -138,6 +138,26 @@ The proxy runs as a systemd **user** service (no root required), configured for 
 - Environment file: `~/.config/llm-proxy/env` (mode `600`; provider API keys plus `LLM_PROXY_DB_URL`, `LLM_PROXY_PORT`, `LLM_PROXY_RUN_ALT_POSTGRES`)
 - Lingering is enabled (`loginctl enable-linger`), so the service starts at boot without a login
 
+The unit file:
+
+```ini
+[Unit]
+Description=LLM proxy (FastAPI on port 6969, Postgres backend)
+After=network-online.target
+StartLimitIntervalSec=0
+
+[Service]
+WorkingDirectory=/home/mike/repos/llm-proxy
+EnvironmentFile=%h/.config/llm-proxy/env
+ExecStart=/home/mike/.local/bin/uv run python main.py
+Nice=19
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
 Useful commands:
 
 ```bash

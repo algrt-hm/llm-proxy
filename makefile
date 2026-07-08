@@ -25,13 +25,13 @@ help:
 	@echo "  build-web          Build frontend for production"
 	@echo "  lint-web           Lint frontend code"
 
-CHEAP_OPENAI_MODEL = gpt-4o-mini
-CHEAP_OPENROUTER_MODEL = moonshotai/kimi-k2.5
+CHEAP_OPENAI_MODEL = gpt-5-nano
+CHEAP_OPENROUTER_MODEL = moonshotai/kimi-k2.6
 CHEAP_PERPLEXITY_MODEL = sonar-pro
 CHEAP_GEMINI_MODEL = gemini-3-flash-preview
-CHEAP_CEREBRAS_MODEL = llama3.1-8b
-CHEAP_ANTHROPIC_MODEL = claude-3-haiku-20240307
-CHEAP_DEEPSEEK_MODEL = deepseek-chat
+CHEAP_CEREBRAS_MODEL = gemma-4-31b
+CHEAP_ANTHROPIC_MODEL = claude-haiku-4-5-20251001
+CHEAP_DEEPSEEK_MODEL = deepseek-v4-flash
 
 run-sqlite:
 	LLM_PROXY_PORT=6969 nice -n20 uv run python main.py
