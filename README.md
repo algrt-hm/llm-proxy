@@ -71,12 +71,58 @@ Inbound authentication is not implemented; this is intended for internal use. Ac
 | `LLM_PROXY_MAX_RETRIES` | `2` | Max retry attempts on transient upstream errors (429, 502, 503, 504) |
 | `LLM_PROXY_RETRY_BASE_DELAY_S` | `1.0` | Base backoff delay (seconds); baseline delay is `base * 2^attempt` (capped at 30s inside shared retry helper) |
 | `LLM_PROXY_MODELS_CACHE` | `./llmproxy_models.json` | Path to cached model lists (re-fetches after 24h) |
+| `ANTHROPIC_ADMIN_API_KEY` | _(unset)_ | Admin API key (`sk-ant-admin01-…`), tried only if `ANTHROPIC_API_KEY` is refused by the Admin API. Neither accepted → the static table below is used |
+| `LLM_PROXY_ANTHROPIC_LIMITS_CACHE` | `./llmproxy_anthropic_limits.json` | Path to cached Anthropic rate limits (re-fetches after 24h) |
 | `LLM_PROXY_DATABASE_URL` | — | Postgres connection string used by the web frontend and `make run`/`make stats-postgres` (plain `postgresql://`, e.g. `postgresql://postgres@myhost/llm-proxy`) |
 | `LLM_PROXY_ANTHROPIC_RPM` | `50` | Anthropic client-side rate limiter: requests/minute (all models) |
 | `LLM_PROXY_ANTHROPIC_TPM` | `30000` | Anthropic limiter: input tokens/minute for model families without a specific override |
 | `LLM_PROXY_ANTHROPIC_OPUS_TPM` | `500000` | Anthropic limiter: input tokens/minute for `claude-opus*` models |
 | `LLM_PROXY_ANTHROPIC_SONNET_TPM` | `30000` | Anthropic limiter: input tokens/minute for `claude-sonnet*` models |
 | `LLM_PROXY_ANTHROPIC_HAIKU_TPM` | `50000` | Anthropic limiter: input tokens/minute for `claude-haiku*` models |
+| `LLM_PROXY_ANTHROPIC_FABLE_TPM` | `1500000` | Anthropic limiter: input tokens/minute for `claude-fable*` models |
+
+### Live Anthropic rate limits
+
+The five `LLM_PROXY_ANTHROPIC_*_TPM` values above are a **fallback**. At startup
+the proxy tries to read the account's real limits from
+[`GET /v1/organizations/rate_limits`](https://platform.claude.com/docs/en/manage-claude/rate-limits-api)
+and uses those instead, so the numbers can't drift out of date.
+
+Keys are tried in order, and whether one works is settled by asking rather than
+by inspecting its prefix:
+
+1. `ANTHROPIC_API_KEY` — the variable Anthropic's own SDKs read for Admin API
+   calls. If your inference key is admin-capable, nothing else needs setting.
+2. `ANTHROPIC_ADMIN_API_KEY` — tried only if the first is refused (401/403).
+
+Only an auth refusal moves on to the next key; a network failure is not
+key-specific, so it stops there. Shape proves nothing about admin capability —
+a Claude Enterprise admin key is `sk-ant-api01-…`, and an organization-scoped
+personal or service-account key is accepted too — which is why no prefix check
+is applied.
+
+The response enumerates every model id and alias in each rate limit group, so
+lookup is an exact match — no prefix guessing. Models the API doesn't mention
+still resolve through the static prefix table.
+
+Two caveats worth knowing before you set it up:
+
+- This is an **Admin API** endpoint. It needs an Admin API key
+  (`sk-ant-admin01-…`) or an organization-scoped key; an ordinary `sk-ant-api…`
+  inference key returns 401, and the Admin API is unavailable to individual
+  (non-organization) accounts.
+- Only **org-level** limits are read. Workspace overrides live on a separate
+  endpoint and are not applied.
+
+Anything short of success (no key, 401/403, network failure, unparseable body)
+logs a warning and leaves the static table in charge — startup never fails over
+this. `GET /status` reports which is in effect:
+
+```json
+"anthropic_rate_limits": { "source": "admin_api", "models": 7 }
+```
+
+`source` is `static_table` with `models: 0` when live limits aren't in use.
 
 Full tracing is recorded to the database. Database interaction uses SQLAlchemy so the backend can be swapped (e.g. SQLite to Postgres).
 

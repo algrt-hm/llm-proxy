@@ -14,6 +14,7 @@ from fastapi import FastAPI, Request, status
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import __version__
+from .anthropic_limits import RPM_TYPE, TPM_TYPE, get_or_fetch_anthropic_limits
 from .db import (
     DB_URL,
     init_db,
@@ -83,6 +84,8 @@ async def lifespan(app: FastAPI):
     log_validation_results(provider_status)
     provider_models = await get_or_fetch_models()
     app.state.provider_models = provider_models
+    anthropic_limits = await get_or_fetch_anthropic_limits()
+    app.state.anthropic_live_limit_count = anthropic_rate_limiter.apply_live_limits(anthropic_limits, rpm_key=RPM_TYPE, tpm_key=TPM_TYPE)
     async with httpx.AsyncClient(timeout=TIMEOUT_S) as client:
         app.state.http_client = client
         yield
@@ -100,6 +103,11 @@ async def health() -> dict[str, str]:
 async def provider_status(request: Request) -> dict:
     results: dict[str, ProviderStatus] = request.app.state.provider_status
     response: dict = {"providers": {name: {"ok": s.ok, "detail": s.detail} for name, s in results.items()}}
+    live_count = getattr(request.app.state, "anthropic_live_limit_count", 0)
+    response["anthropic_rate_limits"] = {
+        "source": "admin_api" if live_count else "static_table",
+        "models": live_count,
+    }
     if trace_stats.trace_failures or trace_stats.cache_hit_failures:
         response["trace_errors"] = {
             "trace_failures": trace_stats.trace_failures,

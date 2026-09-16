@@ -23,6 +23,7 @@ wheels/
 .env
 llmproxy_models.json
 llmproxy_validation.json
+llmproxy_anthropic_limits.json
 llm-proxy-alt.log
 
 # Next.js frontend

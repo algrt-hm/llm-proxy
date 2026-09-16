@@ -29,7 +29,22 @@ _EVICT_INTERVAL = WINDOW
 
 # OpenAI per-model rate limits (rpm, tpm).
 # Models not listed here fall back to the OpenAI defaults.
+# The gpt-5.2+ rows were read from the account's own x-ratelimit-limit-* response
+# headers on 2026-09-16.  Each `-pro` variant needs its own row: it is metered far
+# more tightly than the base model, and longest-prefix matching would otherwise
+# hand it the base model's much larger budget.
 OPENAI_MODEL_LIMITS: dict[str, tuple[int, int]] = {
+    "gpt-5.6-sol": (10_000, 4_000_000),
+    "gpt-5.6-luna": (10_000, 10_000_000),
+    "gpt-5.6-terra": (10_000, 4_000_000),
+    "gpt-5.5": (10_000, 4_000_000),
+    "gpt-5.5-pro": (1_000, 1_000_000),
+    "gpt-5.4": (10_000, 4_000_000),
+    "gpt-5.4-mini": (10_000, 10_000_000),
+    "gpt-5.4-nano": (10_000, 10_000_000),
+    "gpt-5.4-pro": (1_000, 400_000),
+    "gpt-5.2": (10_000, 4_000_000),
+    "gpt-5.2-pro": (1_000, 400_000),
     "gpt-5.1": (5_000, 2_000_000),
     "gpt-5-mini": (5_000, 4_000_000),
     "gpt-5-nano": (5_000, 4_000_000),
@@ -69,6 +84,9 @@ class RateLimiter:
         self.default_rpm = default_rpm
         self.default_tpm = default_tpm
         self.model_limits = model_limits or {}
+        # Exact-match limits fetched from the provider at startup; these win
+        # over the static prefix table.  Empty unless apply_live_limits ran.
+        self.live_limits: dict[str, tuple[int, int]] = {}
         # model -> deque of [timestamp, prompt_tokens] slots
         self._windows: dict[str, deque[list[float | int]]] = {}
         # model -> asyncio.Lock
@@ -78,13 +96,38 @@ class RateLimiter:
         # (set by block_model after upstream 429)
         self._blocked_until: dict[str, float] = {}
 
+    def apply_live_limits(self, limits: dict[str, dict[str, int]], *, rpm_key: str, tpm_key: str) -> int:
+        """Install provider-reported limits, keyed by exact model id.
+
+        *limits* maps a model id to that model's limiter values (as the
+        provider names them).  A model missing either limiter keeps this
+        limiter's default for the missing one.  Returns how many models were
+        installed, so callers can log/report whether live limits are in play.
+        """
+        installed: dict[str, tuple[int, int]] = {}
+        for model, entry in limits.items():
+            rpm = entry.get(rpm_key, self.default_rpm)
+            tpm = entry.get(tpm_key, self.default_tpm)
+            if rpm > 0 and tpm > 0:
+                installed[model] = (rpm, tpm)
+
+        self.live_limits = installed
+        if installed:
+            LOGGER.info("%s: applied live rate limits for %d models", self.provider, len(installed))
+        return len(installed)
+
     def _limits_for(self, model: str) -> tuple[int, int]:
         """Return ``(rpm, tpm)`` for *model*.
 
-        Checks exact match first, then longest-prefix match against the
-        ``model_limits`` keys (handles date suffixes like
-        ``gpt-4o-2024-11-20`` → ``gpt-4o``).  Falls back to defaults.
+        Live provider-reported limits win when present: they are keyed by exact
+        model id (the provider enumerates every alias), so no prefix guessing is
+        needed.  Otherwise checks the static table for an exact match, then
+        longest-prefix match against the ``model_limits`` keys (handles date
+        suffixes like ``gpt-4o-2024-11-20`` → ``gpt-4o``).  Falls back to
+        defaults.
         """
+        if model in self.live_limits:
+            return self.live_limits[model]
         if model in self.model_limits:
             return self.model_limits[model]
         best_key: str | None = None
@@ -222,6 +265,9 @@ ANTHROPIC_MODEL_LIMITS: dict[str, tuple[int, int]] = {
     "claude-opus": (ANTHROPIC_RPM, _int_env("LLM_PROXY_ANTHROPIC_OPUS_TPM", 500_000)),
     "claude-sonnet": (ANTHROPIC_RPM, _int_env("LLM_PROXY_ANTHROPIC_SONNET_TPM", 30_000)),
     "claude-haiku": (ANTHROPIC_RPM, _int_env("LLM_PROXY_ANTHROPIC_HAIKU_TPM", 50_000)),
+    # Fable is metered below the other families: 1.5M input tokens/min against
+    # their 5M, per the account's anthropic-ratelimit-* headers on 2026-09-16.
+    "claude-fable": (ANTHROPIC_RPM, _int_env("LLM_PROXY_ANTHROPIC_FABLE_TPM", 1_500_000)),
 }
 
 

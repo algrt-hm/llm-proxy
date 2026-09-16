@@ -6,9 +6,13 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from llmproxy.ratelimit import (
+    ANTHROPIC_MODEL_LIMITS,
+    ANTHROPIC_RPM,
+    ANTHROPIC_TPM,
     RPM,
     TPM,
     WINDOW,
+    AnthropicRateLimiter,
     GeminiRateLimiter,
     OpenAIRateLimiter,
     RateLimiter,
@@ -348,6 +352,39 @@ def test_openai_limiter_known_models():
     assert lim._limits_for("gpt-4.1-mini") == (5_000, 4_000_000)
     # Unknown model gets defaults
     assert lim._limits_for("ft:gpt-custom:org:suffix") == (5_000, 800_000)
+
+
+def test_openai_limiter_gpt_5_2_plus_models():
+    """gpt-5.2+ resolve to their own rows, including dated snapshots."""
+    lim = OpenAIRateLimiter()
+    assert lim._limits_for("gpt-5.6-sol") == (10_000, 4_000_000)
+    assert lim._limits_for("gpt-5.6-luna") == (10_000, 10_000_000)
+    assert lim._limits_for("gpt-5.6-terra") == (10_000, 4_000_000)
+    assert lim._limits_for("gpt-5.5") == (10_000, 4_000_000)
+    assert lim._limits_for("gpt-5.4-2026-03-05") == (10_000, 4_000_000)
+    assert lim._limits_for("gpt-5.4-mini-2026-03-17") == (10_000, 10_000_000)
+    assert lim._limits_for("gpt-5.4-nano-2026-03-17") == (10_000, 10_000_000)
+
+
+def test_openai_limiter_pro_variants_not_shadowed_by_base_model():
+    """`-pro` rows must win over the base-model prefix: they are metered lower.
+
+    Without their own entries, longest-prefix matching would resolve
+    `gpt-5.4-pro` to `gpt-5.4` and grant 10x the real request budget.
+    """
+    lim = OpenAIRateLimiter()
+    assert lim._limits_for("gpt-5.2-pro") == (1_000, 400_000)
+    assert lim._limits_for("gpt-5.4-pro-2026-03-05") == (1_000, 400_000)
+    assert lim._limits_for("gpt-5.5-pro-2026-04-23") == (1_000, 1_000_000)
+
+
+def test_anthropic_limiter_fable_has_own_entry():
+    """claude-fable-* resolves to its own row, not the Anthropic default."""
+    lim = AnthropicRateLimiter()
+    assert lim._limits_for("claude-fable-5") == ANTHROPIC_MODEL_LIMITS["claude-fable"]
+    # Must not silently fall through to the (much lower) family default.
+    assert lim._limits_for("claude-fable-5") != (ANTHROPIC_RPM, ANTHROPIC_TPM)
+    assert lim._limits_for("claude-opus-5") == ANTHROPIC_MODEL_LIMITS["claude-opus"]
 
 
 @pytest.mark.asyncio
