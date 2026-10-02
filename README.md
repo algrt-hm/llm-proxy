@@ -40,6 +40,7 @@ Each provider needs an API key. Base URLs have built-in defaults and can be over
 - CEREBRAS_API_KEY / CEREBRAS_BASE_URL
 - ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
 - DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL
+- BRAVE_API_KEY / BRAVE_BASE_URL / BRAVE_TIMEOUT_S / BRAVE_RPS (Brave Search pass-through, not an LLM provider; see below)
 
 Gemini requests are sent via the official `google-genai` Python SDK rather than OpenAI-compatible HTTP calls.
 `GEMINI_BASE_URL` is not used by the SDK path.
@@ -125,6 +126,42 @@ this. `GET /status` reports which is in effect:
 `source` is `static_table` with `models: 0` when live limits aren't in use.
 
 Full tracing is recorded to the database. Database interaction uses SQLAlchemy so the backend can be swapped (e.g. SQLite to Postgres).
+
+## Brave Search pass-through
+
+`GET` and `POST /brave/res/v1/{path}` forward to the [Brave Search API](https://api-dashboard.search.brave.com/api-reference)
+(`https://api.search.brave.com/res/v1/{path}`, override with `BRAVE_BASE_URL`),
+adding `X-Subscription-Token` from `BRAVE_API_KEY`. It mirrors Brave's own URL
+layout, so a client changes only its base URL to `http://<proxy>/brave/res/v1`
+and sends no key. Every path, query parameter and POST body is passed through unchanged, e.g.:
+
+```sh
+curl "http://localhost:6969/brave/res/v1/llm/context?q=how+deep+is+the+mediterranean"
+```
+
+- Brave is not an LLM provider, so it is not in the provider list, not
+  validated at startup, and not required by the missing-key preflight.
+  `GET /status` reports `"brave": {"configured": true|false}`.
+- Without `BRAVE_API_KEY`, the route returns `503`. A path that isn't a plain
+  lowercase `a/b` path of at most 128 characters (e.g. one containing `..`) returns
+  `400` and is never forwarded; it is traced with model `invalid-path`.
+- Only `Accept`, `Api-Version`, `Cache-Control`, `Content-Type`, `User-Agent` and
+  `X-Loc-*` request headers are forwarded. A client-supplied `X-Subscription-Token`
+  (header or query param) is dropped. Brave's `X-RateLimit-*` and `Retry-After`
+  response headers are passed back. The response body and content type are
+  returned exactly as Brave sent them; streamed responses are buffered and
+  delivered in one piece.
+- Each call is recorded in `traces` with provider `brave` and model set to the
+  endpoint path (`llm/context`); the request payload is `{"path", "params"}`
+  (plus `"method"` and `"body"` for POST) and never contains the key.
+- Each upstream attempt times out after `BRAVE_TIMEOUT_S` seconds (default 30),
+  not the proxy-wide `LLM_PROXY_TIMEOUT_S`.
+- Retries follow the same rules as the LLM providers (below). Calls are also
+  paced at `BRAVE_RPS` per second (default 1, the free plan; `0` disables
+  pacing), and a `429` holds queued searches until Brave's window resets
+  (`Retry-After`, else the per-second part of `X-RateLimit-Reset`).
+- Responses are **never** served from the response cache: that cache has no TTL,
+  and search results should change over time.
 
 ## Retries
 

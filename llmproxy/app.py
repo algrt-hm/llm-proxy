@@ -15,6 +15,9 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from . import __version__
 from .anthropic_limits import RPM_TYPE, TPM_TYPE, get_or_fetch_anthropic_limits
+from .brave import brave_api_key
+from .brave import router as brave_router
+from .errors import error_response
 from .db import (
     DB_URL,
     init_db,
@@ -92,6 +95,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="llm-proxy", lifespan=lifespan)
+app.include_router(brave_router)
 
 
 @app.get("/health")
@@ -108,6 +112,7 @@ async def provider_status(request: Request) -> dict:
         "source": "admin_api" if live_count else "static_table",
         "models": live_count,
     }
+    response["brave"] = {"configured": brave_api_key() is not None}
     if trace_stats.trace_failures or trace_stats.cache_hit_failures:
         response["trace_errors"] = {
             "trace_failures": trace_stats.trace_failures,
@@ -235,33 +240,6 @@ def _filter_response_headers(headers: httpx.Headers, *, include_content_encoding
     return {key: value for key, value in headers.items() if key.lower() not in excluded}
 
 
-def _error_detail(message: str, request_id: str) -> dict[str, Any]:
-    return {
-        "error": {
-            "message": message,
-            "type": "llmproxy_error",
-            "request_id": request_id,
-        }
-    }
-
-
-def _error_response(
-    status_code: int,
-    message: str,
-    request_id: str,
-    *,
-    extra_headers: dict[str, str] | None = None,
-) -> JSONResponse:
-    headers = {"x-request-id": request_id}
-    if extra_headers:
-        headers.update(extra_headers)
-    return JSONResponse(
-        status_code=status_code,
-        content=_error_detail(message, request_id),
-        headers=headers,
-    )
-
-
 async def _trace_error_response(
     *,
     request_id: str,
@@ -291,7 +269,7 @@ async def _trace_error_response(
         error=error or message,
         idempotency_key=idempotency_key,
     )
-    return _error_response(http_status, message, request_id)
+    return error_response(http_status, message, request_id)
 
 
 def _provider_config_error(provider: str) -> str | None:
@@ -916,7 +894,7 @@ async def chat_completions(request: Request, payload: ChatCompletionRequest):
     started = time.perf_counter()
     idempotency_key = request.headers.get("idempotency-key")
     if idempotency_key and len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LEN:
-        return _error_response(
+        return error_response(
             status.HTTP_400_BAD_REQUEST,
             f"Idempotency-Key exceeds maximum length of {MAX_IDEMPOTENCY_KEY_LEN}",
             request_id,
@@ -1073,7 +1051,7 @@ async def embeddings(request: Request, payload: EmbeddingRequest):
     started = time.perf_counter()
     idempotency_key = request.headers.get("idempotency-key")
     if idempotency_key and len(idempotency_key) > MAX_IDEMPOTENCY_KEY_LEN:
-        return _error_response(
+        return error_response(
             status.HTTP_400_BAD_REQUEST,
             f"Idempotency-Key exceeds maximum length of {MAX_IDEMPOTENCY_KEY_LEN}",
             request_id,
