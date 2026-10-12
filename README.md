@@ -432,6 +432,23 @@ It needs Postgres: it does not read the SQLite database.
 - `make build-web` — production build
 - `make lint-web` — lint frontend code
 
+### Running it under pm2
+
+`make dev-web` is a development server tied to your terminal. To keep the viewer running, serve a production build under [pm2](https://pm2.keymetrics.io/), from `web/`:
+
+```bash
+export LLM_PROXY_DATABASE_URL="postgresql://postgres@myhost/llm-proxy"
+cd web
+npm ci
+npm run build
+pm2 start npm --name llm-proxy-web -- run start -- -H 0.0.0.0 -p 3123
+pm2 save
+```
+
+- `LLM_PROXY_DATABASE_URL` must be set for `npm run build` as well as at start: without it the build stops with `LLM_PROXY_DATABASE_URL is not set`. pm2 records the variable with the process, so a restart needs no environment of its own.
+- `pm2 save` writes the process list that `pm2 resurrect` restores, which is what brings the viewer back after a reboot (run `pm2 resurrect` from `pm2 startup`, or from a systemd unit).
+- After pulling a change to `web/`: `npm ci && npm run build && pm2 restart llm-proxy-web`, with the variable exported.
+
 Pages: Dashboard (`/`), Traces (`/traces` — split-pane with inline detail), Latency (`/latency` — one scatter plot per provider/model, or per endpoint for a REST upstream (its paths are grouped by first segment, so every TfL `Journey/...` request is one plot): a dot per request over time, with lines at the 50th, 75th, 90th, 95th and 99th percentiles, computed in Postgres; log or linear scale, click a dot to open its trace), Cache Hits (`/cache-hits` — split-pane with inline detail).
 
 ## Database & observability
