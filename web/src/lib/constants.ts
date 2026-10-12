@@ -1,3 +1,5 @@
+// One entry per LLM provider. The latency route also reads these names to tell
+// an LLM provider from a REST upstream, so a new provider must be added here.
 export const PROVIDER_COLORS: Record<string, string> = {
   openai: "bg-green-100 text-green-800",
   openrouter: "bg-purple-100 text-purple-800",
@@ -17,6 +19,12 @@ export const PROVIDER_BAR_COLORS: Record<string, string> = {
   anthropic: "#f97316",
   deepseek: "#06b6d4",
 };
+
+// Latency page. Percentile lines are one hue, light to dark with the
+// percentile, in the order the API returns them (p50, p75, p90, p95, p99).
+export const PERCENTILE_LINE_COLORS = ["#86b6ef", "#5598e7", "#2a78d6", "#1c5cab", "#0d366b"];
+export const LATENCY_DOT_COLOR = "#71717a";
+export const LATENCY_ERROR_COLOR = "#d03b3b";
 
 export const TIME_RANGES = [
   { label: "1h", value: "1h", hours: 1 },

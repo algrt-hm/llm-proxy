@@ -58,6 +58,26 @@ export interface StatsResponse {
   totals: StatsTotals;
 }
 
+// One request on the latency page: [trace id, epoch ms, latency ms, status code]
+export type LatencyPoint = [number, number, number, number | null];
+
+export interface LatencySeries {
+  provider: string;
+  model: string;
+  n: number;
+  // Latency in ms over every request in the window; stddev is the population one.
+  mean: number;
+  stddev: number;
+  // Same order as LatencyResponse.percentiles
+  percentiles: number[];
+  points: LatencyPoint[];
+}
+
+export interface LatencyResponse {
+  percentiles: number[];
+  series: LatencySeries[];
+}
+
 export interface CacheHitItem {
   id: number;
   created_at: string | null;

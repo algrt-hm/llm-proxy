@@ -24,11 +24,16 @@ and uses OpenAI-compatible endpoints. It also provides Ollama and llama.cpp comp
 endpoints (`/api/tags`, `/api/show`, `/version`, `/props`) so clients like Open WebUI can
 discover and use models without extra configuration.
 
+It can also sit in front of non-LLM HTTP APIs: [Brave Search](#brave-search-pass-through)
+and [any REST API you name](#generic-rest-pass-through). The proxy holds their keys,
+traces every call and, for the generic route, can cache `GET` responses for a set time.
+
 You select the model/provider via the `model` field
 (Perplexity, OpenAI, OpenRouter, Google Gemini, Cerebras, Anthropic, DeepSeek).
 
-Model selection supports a provider prefix, e.g. `openai:gpt-4o-mini`,
-`openrouter:openai/gpt-4o-mini`, or `openai/gpt-4o-mini`.
+Model selection supports a provider prefix, e.g. `openai/gpt-4o-mini` or
+`openrouter/openai/gpt-4o-mini`. The older colon form (`openai:gpt-4o-mini`) still
+works but is deprecated and logs a warning.
 If no prefix is provided, `LLM_PROXY_DEFAULT_PROVIDER` is used (defaults to `openai`).
 If the `model` field is omitted or empty, `LLM_PROXY_DEFAULT_MODEL` is used (defaults to `deepseek/deepseek-v4-pro`).
 
@@ -40,8 +45,10 @@ Each provider needs an API key. Base URLs have built-in defaults and can be over
 - CEREBRAS_API_KEY / CEREBRAS_BASE_URL
 - ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
 - DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL
-- BRAVE_API_KEY / BRAVE_BASE_URL / BRAVE_TIMEOUT_S / BRAVE_RPS (Brave Search pass-through, not an LLM provider; see below)
-- LLM_PROXY_REST_UPSTREAMS plus `<NAME>_BASE_URL` etc. per upstream (generic REST pass-through for any other HTTP API; see below)
+
+The pass-throughs are not LLM providers and have their own variables (see their sections below):
+- BRAVE_API_KEY / BRAVE_BASE_URL / BRAVE_TIMEOUT_S / BRAVE_RPS (Brave Search)
+- LLM_PROXY_REST_UPSTREAMS plus `<NAME>_BASE_URL` etc. per upstream (generic REST pass-through)
 
 Gemini requests are sent via the official `google-genai` Python SDK rather than OpenAI-compatible HTTP calls.
 `GEMINI_BASE_URL` is not used by the SDK path.
@@ -59,17 +66,57 @@ Inbound authentication is not implemented; this is intended for internal use. Ac
 > traces stored in the database. Run it only on a trusted network (e.g. `localhost`
 > or a private/VPN interface), or place an authenticating reverse proxy in front.
 
+## Getting started
+
+Prerequisites:
+
+- [uv](https://docs.astral.sh/uv/). It installs the pinned Python (3.14.1, see `.python-version`) and the dependencies the first time you run anything, so there is no separate install step.
+- An API key for at least one provider.
+- Optional: Postgres (SQLite is the default), `psql` or `sqlite3` for the `make stats-*` targets, and Node.js with `npm` for the trace viewer.
+
+Configuration is by environment variables only. The proxy does not read a `.env` file, so export them in your shell (or use the systemd `EnvironmentFile` described below).
+
+```sh
+git clone https://github.com/algrt-hm/llm-proxy.git
+cd llm-proxy
+export OPENAI_API_KEY=sk-...        # any of the provider keys listed above
+make run-sqlite                     # port 6969, traces in ./llmproxy.db
+```
+
+Then, from another terminal:
+
+```sh
+curl http://localhost:6969/health
+curl http://localhost:6969/status   # which provider keys were accepted
+curl http://localhost:6969/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"openai/gpt-4o-mini","messages":[{"role":"user","content":"hi"}]}'
+```
+
+Interactive API docs are at `http://localhost:6969/docs`. Any OpenAI-compatible client works with `http://localhost:6969/v1` as its base URL and any placeholder API key.
+
+To use Postgres instead, create an empty database (the proxy creates its own tables at startup) and point `LLM_PROXY_DATABASE_URL` at it:
+
+```sh
+createdb llm-proxy
+export LLM_PROXY_DATABASE_URL=postgresql://postgres@localhost/llm-proxy
+make run
+```
+
+`make run` sets `LLM_PROXY_RUN_ALT_POSTGRES=1`, which adds a startup check: the database URL must be valid and **every** provider's API key must be set. With a key missing it asks whether to continue when run in a terminal, and exits when run non-interactively (e.g. under systemd). Use `make run-sqlite`, or leave that variable unset, to start with only some providers configured.
+
 ## Runtime environment variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LLM_PROXY_HOST` | `0.0.0.0` | Server bind address |
 | `LLM_PROXY_PORT` | `8000` | Server port |
-| `LLM_PROXY_RELOAD` | off | Enable dev auto-reload (`1`, `true`, or `yes`) |
+| `LLM_PROXY_RELOAD` | off | Enable dev auto-reload (`1`, `true`, `yes`, `y` or `on`) |
 | `LLM_PROXY_DEFAULT_PROVIDER` | `openai` | Provider used when model has no prefix |
 | `LLM_PROXY_DEFAULT_MODEL` | `deepseek/deepseek-v4-pro` | Model (with optional provider prefix) used when `model` field is omitted or empty |
 | `LLM_PROXY_TIMEOUT_S` | `900` | HTTP request timeout (seconds) |
 | `LLM_PROXY_DB_URL` | `sqlite+aiosqlite:///./llmproxy.db` | SQLAlchemy database URL (SQLite 3.35+ and Postgres supported, e.g. `postgresql+asyncpg://user:pass@localhost/llmproxy`) |
+| `LLM_PROXY_RUN_ALT_POSTGRES` | off | Run the strict startup check (valid `LLM_PROXY_DB_URL` and every provider key set; see Getting started). Set by `make run` |
 | `LLM_PROXY_MAX_RETRIES` | `2` | Max retry attempts on transient upstream errors (429, 502, 503, 504) |
 | `LLM_PROXY_RETRY_BASE_DELAY_S` | `1.0` | Base backoff delay (seconds); baseline delay is `base * 2^attempt` (capped at 30s inside shared retry helper) |
 | `LLM_PROXY_MODELS_CACHE` | `./llmproxy_models.json` | Path to cached model lists (re-fetches after 24h) |
@@ -125,8 +172,6 @@ this. `GET /status` reports which is in effect:
 ```
 
 `source` is `static_table` with `models: 0` when live limits aren't in use.
-
-Full tracing is recorded to the database. Database interaction uses SQLAlchemy so the backend can be swapped (e.g. SQLite to Postgres).
 
 ## Brave Search pass-through
 
@@ -209,13 +254,17 @@ Per-upstream settings (`<NAME>` is the upper-cased name):
   `User-Agent` and the `<NAME>_FORWARD_HEADERS` are forwarded; `Authorization`,
   `Cookie` and the upstream's own key header or query parameter are always
   dropped from the client's request.
-- A path with a `.` or `..` segment returns `400` and is never forwarded.
+- A path with a `.` or `..` segment returns `400` and is never forwarded. The
+  path is decoded and re-encoded on the way through, so an encoded slash (`%2F`)
+  inside a segment reaches the upstream as a plain `/`.
 - The response status, body and content type are returned as the upstream sent
   them, with its headers except hop-by-hop ones, `Set-Cookie` and `X-Cache`.
   Redirects are returned, not followed.
 - Each call is recorded in `traces` with provider = the upstream name and model
-  = the path; the request payload is `{"method", "path", "params"}` plus
-  `"headers"` and `"body"` when present, and never contains the key.
+  = the path (cut to 256 characters); the request payload is
+  `{"method", "path", "params"}` plus `"headers"` and `"body"` when present,
+  and never contains the key. Requests to an unlisted or misconfigured
+  upstream are not traced.
 - **Caching** applies to `GET` responses with a 2xx status, keyed on path, query
   and forwarded headers (except `User-Agent`). A hit returns `x-cache: hit`, an
   `Age` header and the original `x-request-id`, and is logged in `cache_hits`;
@@ -265,9 +314,11 @@ Per-upstream settings (`<NAME>` is the upper-cased name):
 - Gemini streaming uses the Google GenAI SDK and builds OpenAI-compatible SSE chunks on the fly.
 - Trace writes are shielded from client disconnects via `asyncio.shield`, so a client dropping mid-stream does not lose the trace.
 
-## Formatting and linting
+## Formatting, linting and tests
 
 - `make format` (runs `uv run ruff check --fix .` then `uv run ruff format .`)
+- `make lint` (runs `uv run ruff check .` without applying fixes)
+- `make test` (runs `uv run pytest tests/`)
 
 ## Running locally
 
@@ -284,10 +335,10 @@ Clients that probe for Ollama or llama.cpp endpoints (e.g. Open WebUI) will also
 The proxy runs as a systemd **user** service (no root required), configured for the Postgres backend on port `6969`:
 
 - Unit file: `~/.config/systemd/user/llm-proxy.service`
-- Environment file: `~/.config/llm-proxy/env` (mode `600`; provider API keys plus `LLM_PROXY_DB_URL`, `LLM_PROXY_PORT`, `LLM_PROXY_RUN_ALT_POSTGRES`)
+- Environment file: `~/.config/llm-proxy/env` (mode `600`; provider API keys plus `LLM_PROXY_DB_URL`, `LLM_PROXY_PORT`, `LLM_PROXY_RUN_ALT_POSTGRES`, and, for the pass-throughs, `BRAVE_API_KEY` and `LLM_PROXY_REST_UPSTREAMS` with each upstream's `<NAME>_*` settings; restart the service after editing it)
 - Lingering is enabled (`loginctl enable-linger`), so the service starts at boot without a login
 
-The unit file:
+The unit file (adjust the two absolute paths to your checkout and your `uv`):
 
 ```ini
 [Unit]
@@ -307,6 +358,36 @@ RestartSec=5
 WantedBy=default.target
 ```
 
+The environment file is plain `KEY=value` lines, for example:
+
+```sh
+LLM_PROXY_PORT=6969
+LLM_PROXY_DB_URL=postgresql+asyncpg://postgres@dbhost/llm-proxy
+OPENAI_API_KEY=sk-...
+ANTHROPIC_API_KEY=sk-ant-...
+BRAVE_API_KEY=...
+LLM_PROXY_REST_UPSTREAMS=tfl
+TFL_BASE_URL=https://api.tfl.gov.uk
+TFL_API_KEY=...
+TFL_AUTH_QUERY=app_key
+TFL_CACHE_TTL_S=60
+```
+
+Note that the service reads `LLM_PROXY_DB_URL` directly (SQLAlchemy form, `postgresql+asyncpg://`); only `make run` derives it from `LLM_PROXY_DATABASE_URL`.
+
+First-time install:
+
+```bash
+mkdir -p ~/.config/systemd/user ~/.config/llm-proxy
+# write the unit file and the env file shown above, then:
+chmod 600 ~/.config/llm-proxy/env
+loginctl enable-linger "$USER"
+systemctl --user daemon-reload
+systemctl --user enable --now llm-proxy
+```
+
+To deploy a new version: `git pull` in the checkout, then `systemctl --user restart llm-proxy`.
+
 Useful commands:
 
 ```bash
@@ -325,8 +406,9 @@ Note: when the service is running it holds port `6969`, so stop it first (`syste
 
 ## Provider checks
 
-- `make ping-providers` (proxy chat smoke test; uses credits)
-- `make ping-providers-all` (same, with cheap default models)
+- `make ping-providers` (proxy chat smoke test; uses credits). Needs a running proxy and one `LLM_PROXY_TEST_MODEL_<PROVIDER>` variable per provider to test, e.g. `LLM_PROXY_TEST_MODEL_OPENAI=gpt-5-nano make ping-providers`.
+- `make ping-providers-all` (same, with the cheap default models set in the makefile: `CHEAP_<PROVIDER>_MODEL`)
+- Optional for both, and for `make validate-keys`: `LLM_PROXY_TEST_PROVIDERS` (comma-separated subset), `LLM_PROXY_TEST_TIMEOUT_S` (default 60 for the ping, 30 for validation). `LLM_PROXY_TEST_FORCE_ALL=1` runs a provider even when its key is not set locally.
 - Ping targets use `LLM_PROXY_BASE_URL=http://localhost:6969` and the ping script normalizes local base URLs to port `6969`.
 - `make validate-keys` (direct upstream key validation; free/read-only endpoints)
 - On server startup, llm-proxy runs the same free/read-only key validation logic as `make validate-keys` and caches results in-memory for the lifetime of the process.
@@ -339,17 +421,22 @@ The frontend reads `LLM_PROXY_DATABASE_URL` for its Postgres connection string (
 
 ```bash
 export LLM_PROXY_DATABASE_URL="postgresql://postgres@myhost/llm-proxy"
+make install-web   # once
 make dev-web
 ```
+
+It needs Postgres: it does not read the SQLite database.
 
 - `make install-web` — install frontend dependencies
 - `make dev-web` — start dev server on port `3123`
 - `make build-web` — production build
 - `make lint-web` — lint frontend code
 
-Pages: Dashboard (`/`), Traces (`/traces` — split-pane with inline detail), Cache Hits (`/cache-hits` — split-pane with inline detail).
+Pages: Dashboard (`/`), Traces (`/traces` — split-pane with inline detail), Latency (`/latency` — one scatter plot per provider/model, or per endpoint for a REST upstream (its paths are grouped by first segment, so every TfL `Journey/...` request is one plot): a dot per request over time, with lines at the 50th, 75th, 90th, 95th and 99th percentiles, computed in Postgres; log or linear scale, click a dot to open its trace), Cache Hits (`/cache-hits` — split-pane with inline detail).
 
 ## Database & observability
+
+Every request and response is recorded in full in the `traces` table. Database access goes through SQLAlchemy, so the backend can be SQLite (the default) or Postgres; set it with `LLM_PROXY_DB_URL`.
 
 - `make stats-sqlite` (per-model trace counts, token usage, cache hit rates)
 - `make stats-postgres` (same stats from `LLM_PROXY_DATABASE_URL`)
@@ -372,33 +459,40 @@ Pages: Dashboard (`/`), Traces (`/traces` — split-pane with inline detail), Ca
 │  └─ validate_keys.py      # API key validation (free, no credits)
 ├─ tests/
 │  ├─ __init__.py
+│  ├─ test_anthropic_limits.py # Live Anthropic rate limits: Admin API parsing, pagination, key fallback, caching
+│  ├─ test_brave.py         # Brave pass-through: forwarding, validation, tracing, retries, pacing, timeouts
 │  ├─ test_gemini.py        # Gemini config builder tests (thinking/reasoning)
 │  ├─ test_ratelimit.py     # Rate limiter tests (RPM/TPM, per-model limits, prefix matching, eviction, retry integration)
 │  ├─ test_retry.py         # Retry delay parsing tests (Retry-After + Gemini SDK retry hints)
 │  ├─ test_response_cache.py # Response cache, idempotency cross-endpoint rejection, empty input validation, degenerate response rejection tests
+│  ├─ test_rest.py          # Generic REST pass-through: forwarding, key injection, TTL cache, retries by method, status
 │  ├─ test_payload_passthrough.py  # Schema extra-field passthrough + URL builder tests
 │  └─ test_main_preflight.py # Preflight checks: --require-db-url, DB URL validation, missing API keys
 ├─ llmproxy/
 │  ├─ __init__.py           # Package version
+│  ├─ anthropic_limits.py   # Reads live Anthropic rate limits from the Admin API + disk caching
 │  ├─ app.py                # FastAPI app, routing, proxy logic (chat + embeddings), compatibility endpoints, streaming SSE parse
+│  ├─ brave.py              # Brave Search pass-through (/brave/res/v1/{path}) + per-second pacer
 │  ├─ constants.py          # Package name, Anthropic API version, validation timeout
 │  ├─ db.py                 # SQLAlchemy async engine + trace/cache_hits tables + DB URL redaction
+│  ├─ errors.py             # The proxy's own error envelope, shared by every route
 │  ├─ gemini.py             # Gemini SDK adapter (chat + embeddings) + OpenAI response mapping
 │  ├─ libraries.md          # Library reference notes (httpx.AsyncClient)
 │  ├─ models.py             # Concurrent per-provider model listing, models.dev enrichment + disk caching
 │  ├─ openai.py             # OpenAI response/chunk builders (chat completion, stream chunk, done chunk, embedding response, usage mapping)
 │  ├─ providers.py          # Provider parsing, default model, auth config, base URL + endpoint URL builders (chat + embeddings)
-│  ├─ ratelimit.py          # Client-side rate limiter (sliding window, RPM + TPM, per-model limits, stale eviction)
+│  ├─ ratelimit.py          # Client-side rate limiter (sliding window, RPM + TPM, per-model limits, live limits, stale eviction)
+│  ├─ rest.py               # Generic REST pass-through (/rest/{name}/{path}) with opt-in TTL cache
 │  ├─ retry.py              # Retry config, Retry-After parsing, Gemini retry-hint parsing, backoff delay
 │  ├─ schemas.py            # Pydantic request models (ChatCompletionRequest, EmbeddingRequest; model optional, extra=allow)
-│  ├─ tracing.py            # Trace persistence (asyncio.shield), cache-hit logging, idempotency + response-cache lookup
+│  ├─ tracing.py            # Trace persistence (asyncio.shield), cache-hit logging, idempotency + response-cache + REST TTL-cache lookup
 │  ├─ utility.py            # Logging helpers (validation result formatting)
 │  └─ validation.py         # Concurrent provider key validation + in-memory caching
 └─ web/                      # Next.js trace viewer frontend (App Router, TypeScript, Tailwind)
    ├─ package.json           # Frontend deps (next, react, tailwindcss, pg)
    ├─ next.config.ts         # Next.js config
-   ├─ src/lib/db.ts          # Shared Postgres pool (pg.Pool, DATABASE_URL)
-   ├─ src/app/               # Pages: dashboard (/), traces (split-pane), cache hits (split-pane)
+   ├─ src/lib/db.ts          # Shared Postgres pool (pg.Pool, LLM_PROXY_DATABASE_URL)
+   ├─ src/app/               # Pages: dashboard (/), traces (split-pane), latency (scatter per model), cache hits (split-pane)
    ├─ src/app/api/traces/    # API routes querying Postgres directly
-   └─ src/components/        # Nav, JsonTree, BarChart, TraceTable, CacheHitDetailPanel, filters, badges
+   └─ src/components/        # Nav, JsonTree, BarChart, LatencyScatter, TraceTable, CacheHitDetailPanel, filters, badges
 ```

@@ -1,6 +1,7 @@
 import type {
   CacheHitItem,
   CacheHitStatsResponse,
+  LatencyResponse,
   PaginatedResponse,
   ProviderModels,
   StatsResponse,
@@ -29,6 +30,15 @@ export async function fetchStats(params: {
   until?: string;
 }): Promise<StatsResponse | null> {
   const res = await fetch(`${BASE}/stats${qs(params)}`);
+  if (!res.ok) return null;
+  return res.json();
+}
+
+export async function fetchLatency(params: {
+  since?: string;
+  until?: string;
+}): Promise<LatencyResponse | null> {
+  const res = await fetch(`${BASE}/latency${qs(params)}`);
   if (!res.ok) return null;
   return res.json();
 }
