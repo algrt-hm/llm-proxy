@@ -47,6 +47,8 @@ from .providers import (
     get_provider_config,
     parse_model,
 )
+from .rest import log_rest_upstreams, rest_status
+from .rest import router as rest_router
 from .ratelimit import AnthropicRateLimiter, GeminiRateLimiter, OpenAIRateLimiter, RateLimiter, estimate_tokens
 from .retry import (
     MAX_RETRIES,
@@ -85,6 +87,7 @@ async def lifespan(app: FastAPI):
     provider_status = await get_or_validate()
     app.state.provider_status = provider_status
     log_validation_results(provider_status)
+    log_rest_upstreams()
     provider_models = await get_or_fetch_models()
     app.state.provider_models = provider_models
     anthropic_limits = await get_or_fetch_anthropic_limits()
@@ -96,6 +99,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title="llm-proxy", lifespan=lifespan)
 app.include_router(brave_router)
+app.include_router(rest_router)
 
 
 @app.get("/health")
@@ -113,6 +117,7 @@ async def provider_status(request: Request) -> dict:
         "models": live_count,
     }
     response["brave"] = {"configured": brave_api_key() is not None}
+    response["rest"] = rest_status()
     if trace_stats.trace_failures or trace_stats.cache_hit_failures:
         response["trace_errors"] = {
             "trace_failures": trace_stats.trace_failures,

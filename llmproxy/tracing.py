@@ -3,6 +3,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
@@ -191,6 +192,40 @@ async def lookup_idempotency(key: str, *, provider: str, model: str) -> Trace | 
             return result.scalar_one_or_none()
     except Exception:
         LOGGER.exception("Failed idempotency lookup for key=%s", key)
+        return None
+
+
+async def lookup_rest_cache(*, provider: str, model: str, request_payload: object, max_age_s: float) -> Trace | None:
+    """Newest successful trace for this request no older than *max_age_s*.
+
+    The REST pass-through's counterpart of ``lookup_response_cache``: REST
+    answers go stale, so the lookup is bounded by a TTL, and the payload checks
+    are left to the caller (a ``{"raw": ...}`` text response is servable here).
+    """
+    cache_key = _build_cache_key(provider=provider, model=model, request_payload=request_payload)
+    if not cache_key:
+        return None
+    cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_s)
+    try:
+        async with SessionLocal() as session:
+            stmt = (
+                select(Trace)
+                .where(
+                    Trace.cache_key == cache_key,
+                    Trace.provider == provider,
+                    Trace.created_at >= cutoff,
+                    Trace.status_code.isnot(None),
+                    Trace.status_code >= 200,
+                    Trace.status_code < 300,
+                    Trace.response_json.isnot(None),
+                )
+                .order_by(Trace.id.desc())
+                .limit(1)
+            )
+            result = await session.execute(stmt)
+            return result.scalar_one_or_none()
+    except Exception:
+        LOGGER.exception("Failed REST cache lookup for cache_key=%s", cache_key)
         return None
 
 

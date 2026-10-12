@@ -41,6 +41,7 @@ Each provider needs an API key. Base URLs have built-in defaults and can be over
 - ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL
 - DEEPSEEK_API_KEY / DEEPSEEK_BASE_URL
 - BRAVE_API_KEY / BRAVE_BASE_URL / BRAVE_TIMEOUT_S / BRAVE_RPS (Brave Search pass-through, not an LLM provider; see below)
+- LLM_PROXY_REST_UPSTREAMS plus `<NAME>_BASE_URL` etc. per upstream (generic REST pass-through for any other HTTP API; see below)
 
 Gemini requests are sent via the official `google-genai` Python SDK rather than OpenAI-compatible HTTP calls.
 `GEMINI_BASE_URL` is not used by the SDK path.
@@ -162,6 +163,71 @@ curl "http://localhost:6969/brave/res/v1/llm/context?q=how+deep+is+the+mediterra
   (`Retry-After`, else the per-second part of `X-RateLimit-Reset`).
 - Responses are **never** served from the response cache: that cache has no TTL,
   and search results should change over time.
+
+## Generic REST pass-through
+
+Any other HTTP API can be put behind the proxy without code changes, to get the
+same key handling, tracing, retries and pacing, plus an optional TTL cache.
+List the upstreams in `LLM_PROXY_REST_UPSTREAMS` (comma-separated) and give each
+a base URL; `/rest/<name>/<path>` then forwards to `<NAME>_BASE_URL/<path>` with
+the query string and body unchanged. `GET`, `POST`, `PUT`, `PATCH` and `DELETE`
+are accepted.
+
+For example, the [TfL API](https://api.tfl.gov.uk), which takes its key as the
+`app_key` query parameter:
+
+```sh
+LLM_PROXY_REST_UPSTREAMS=tfl
+TFL_BASE_URL=https://api.tfl.gov.uk
+TFL_API_KEY=...
+TFL_AUTH_QUERY=app_key
+TFL_CACHE_TTL_S=60
+```
+
+```sh
+curl "http://localhost:6969/rest/tfl/Line/Mode/tube/Status"
+```
+
+Per-upstream settings (`<NAME>` is the upper-cased name):
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `<NAME>_BASE_URL` | required | Where `/rest/<name>/` points. |
+| `<NAME>_API_KEY` | none | Credential the proxy adds. Omit for a public API. |
+| `<NAME>_AUTH_HEADER` / `<NAME>_AUTH_PREFIX` | `Authorization` / `Bearer` | Header the key is sent in (set the prefix to empty for a bare key). |
+| `<NAME>_AUTH_QUERY` | none | Send the key as this query parameter instead of a header. |
+| `<NAME>_CACHE_TTL_S` | `0` (off) | Serve a repeated `GET` from the trace DB for this many seconds. |
+| `<NAME>_RPS` | `0` (unpaced) | Maximum upstream calls per second. |
+| `<NAME>_TIMEOUT_S` | `30` | Timeout per upstream attempt. |
+| `<NAME>_FORWARD_HEADERS` | none | Extra request headers to forward (comma-separated), e.g. an API-version header. |
+
+- A name is lowercase `[a-z][a-z0-9_]{0,31}` and cannot be an LLM provider's or
+  `brave`. `GET /status` lists each upstream under `"rest"` (never its key) and
+  says why a misconfigured one is refused; a request to one returns `503`, and
+  to an unlisted name `404`.
+- Clients send no credentials. Only `Accept`, `Accept-Language`, `Content-Type`,
+  `User-Agent` and the `<NAME>_FORWARD_HEADERS` are forwarded; `Authorization`,
+  `Cookie` and the upstream's own key header or query parameter are always
+  dropped from the client's request.
+- A path with a `.` or `..` segment returns `400` and is never forwarded.
+- The response status, body and content type are returned as the upstream sent
+  them, with its headers except hop-by-hop ones, `Set-Cookie` and `X-Cache`.
+  Redirects are returned, not followed.
+- Each call is recorded in `traces` with provider = the upstream name and model
+  = the path; the request payload is `{"method", "path", "params"}` plus
+  `"headers"` and `"body"` when present, and never contains the key.
+- **Caching** applies to `GET` responses with a 2xx status, keyed on path, query
+  and forwarded headers (except `User-Agent`). A hit returns `x-cache: hit`, an
+  `Age` header and the original `x-request-id`, and is logged in `cache_hits`;
+  a cacheable miss returns `x-cache: miss`. Send `Cache-Control: no-cache` to
+  skip the lookup; the fresh answer then replaces the cached one. JSON is
+  served re-serialised as `application/json`, other UTF-8 text byte-for-byte
+  with its content type; binary and empty responses are not cached. A hit
+  carries none of the upstream's other headers.
+- Retries follow the rules below for `GET`, `PUT` and `DELETE`. `POST` and
+  `PATCH` are retried only after a `429`, since repeating one after a dropped
+  connection or a `5xx` could do the work twice. A `429` also holds queued
+  calls to that upstream until its `Retry-After` has passed.
 
 ## Retries
 
