@@ -261,9 +261,10 @@ Per-upstream settings (`<NAME>` is the upper-cased name):
 | `<NAME>_USER_AGENT` | none | The `User-Agent` the upstream sees, in place of whatever the client sent (or did not send: httpx's stock agent goes otherwise, which Nominatim refuses with 403). Latin-1 text with no control characters. Unset: the client's is forwarded. |
 
 - A name is lowercase `[a-z][a-z0-9_]{0,31}` and cannot be an LLM provider's or
-  `brave`. `GET /status` lists each upstream under `"rest"` (never its key) and
-  says why a misconfigured one is refused; a request to one returns `503`, and
-  to an unlisted name `404`.
+  `brave`. `GET /status` lists each upstream under `"rest"` with its base URL,
+  whether it has a key (`auth`, never the key itself), `cache_ttl_s`, `rps` and
+  `user_agent`, and says why a misconfigured one is refused; a request to one
+  returns `503`, and to an unlisted name `404`.
 - Clients send no credentials. Only `Accept`, `Accept-Language`, `Content-Type`,
   `User-Agent` and the `<NAME>_FORWARD_HEADERS` are forwarded; `Authorization`,
   `Cookie` and the upstream's own key header or query parameter are always
@@ -414,6 +415,10 @@ systemctl --user start llm-proxy      # start
 journalctl --user -u llm-proxy -f     # follow logs (replaces llm-proxy-alt.log)
 journalctl --user -u llm-proxy -n 100 # last 100 log lines
 ```
+
+The journal carries the proxy's own lines (database check, which providers and
+REST upstreams are configured, retries, rate-limit waits) at `LLM_PROXY_LOG_LEVEL`,
+default `INFO`, in the same timestamped format as uvicorn's.
 
 After editing the unit file, run `systemctl --user daemon-reload` before restarting.
 After rotating an API key, edit `~/.config/llm-proxy/env` and restart the service.
