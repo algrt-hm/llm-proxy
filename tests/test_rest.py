@@ -56,7 +56,7 @@ def tfl(monkeypatch):
     monkeypatch.setenv("GITHUB_BASE_URL", "https://api.github.com")
     monkeypatch.setenv("GITHUB_API_KEY", "gh-token")
     monkeypatch.setenv("GITHUB_FORWARD_HEADERS", "X-GitHub-Api-Version, Authorization")
-    for name in ("TFL_CACHE_TTL_S", "TFL_RPS", "TFL_TIMEOUT_S", "TFL_AUTH_HEADER", "TFL_AUTH_PREFIX"):
+    for name in ("TFL_CACHE_TTL_S", "TFL_RPS", "TFL_TIMEOUT_S", "TFL_AUTH_HEADER", "TFL_AUTH_PREFIX", "TFL_USER_AGENT"):
         monkeypatch.delenv(name, raising=False)
     # Fresh per test so a 429 in one test cannot delay the next.
     monkeypatch.setattr(rest_module, "_pacers", {})
@@ -155,12 +155,44 @@ async def test_header_auth_and_extra_forwarded_headers(traces):
 
 
 @pytest.mark.asyncio
+async def test_user_agent_is_the_upstreams_when_set(traces, monkeypatch):
+    """``<NAME>_USER_AGENT`` is what the upstream sees, whatever the client
+    sent; without it the client's own agent is forwarded as before."""
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    async with _client(handler) as client:
+        await rest_module.rest_proxy("tfl", "x", _build_request(client, headers={"User-Agent": "mxa-geo/1.0"}))
+        monkeypatch.setenv("TFL_USER_AGENT", "llm-proxy/1.0 (+https://example.test)")
+        assert rest_module.rest_status()["tfl"]["user_agent"] == "llm-proxy/1.0 (+https://example.test)"
+        await rest_module.rest_proxy("tfl", "x", _build_request(client, headers={"User-Agent": "mxa-geo/1.0"}))
+        await rest_module.rest_proxy("tfl", "x", _build_request(client))
+        # Tab and obs-text are legal in a header value, so they are not refused.
+        monkeypatch.setenv("TFL_USER_AGENT", "llm-proxy/1.0\t(caf\u00e9)")
+        await rest_module.rest_proxy("tfl", "x", _build_request(client))
+
+    forwarded, replaced, supplied, odd = seen
+    assert forwarded.headers["user-agent"] == "mxa-geo/1.0"
+    assert replaced.headers["user-agent"] == "llm-proxy/1.0 (+https://example.test)"
+    assert supplied.headers["user-agent"] == "llm-proxy/1.0 (+https://example.test)"
+    assert odd.headers["user-agent"] == "llm-proxy/1.0\t(caf\u00e9)"
+    # Not part of the trace, so it cannot split the cache.
+    for trace in traces:
+        assert "user-agent" not in trace["request_payload"].get("headers", {})
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("name", "env", "expected"),
     [
         ("nope", {}, 404),
         ("openai", {"LLM_PROXY_REST_UPSTREAMS": "openai", "OPENAI_BASE_URL": "https://x.test"}, 503),
         ("tfl", {"TFL_BASE_URL": ""}, 503),
+        ("tfl", {"TFL_USER_AGENT": "agent \u2603"}, 503),
+        ("tfl", {"TFL_USER_AGENT": "agent\r\nX-Injected: 1"}, 503),
     ],
 )
 async def test_unknown_or_misconfigured_upstream(traces, monkeypatch, name, env, expected):
@@ -329,7 +361,14 @@ def test_rest_status_hides_keys_and_reports_misconfiguration(tfl, monkeypatch):
     monkeypatch.setenv("TFL_CACHE_TTL_S", "300")
     result = rest_module.rest_status()
 
-    assert result["tfl"] == {"configured": True, "base_url": "https://api.tfl.gov.uk", "auth": True, "cache_ttl_s": 300.0, "rps": 0.0}
+    assert result["tfl"] == {
+        "configured": True,
+        "base_url": "https://api.tfl.gov.uk",
+        "auth": True,
+        "cache_ttl_s": 300.0,
+        "rps": 0.0,
+        "user_agent": None,
+    }
     assert result["bad-name"]["configured"] is False
     assert result["anthropic"]["configured"] is False
     assert "server-key" not in json.dumps(result)

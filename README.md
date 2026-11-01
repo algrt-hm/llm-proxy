@@ -233,6 +233,18 @@ TFL_CACHE_TTL_S=60
 curl "http://localhost:6969/rest/tfl/Line/Mode/tube/Status"
 ```
 
+Or a public API with no key whose terms want callers identified and paced,
+such as [Nominatim](https://operations.osmfoundation.org/policies/nominatim/)
+(one request a second, an identifying `User-Agent`, results cached):
+
+```sh
+LLM_PROXY_REST_UPSTREAMS=tfl,nominatim
+NOMINATIM_BASE_URL=https://nominatim.openstreetmap.org
+NOMINATIM_RPS=1
+NOMINATIM_CACHE_TTL_S=2592000
+NOMINATIM_USER_AGENT="llm-proxy/1.0 (+https://github.com/algrt-hm/llm-proxy)"
+```
+
 Per-upstream settings (`<NAME>` is the upper-cased name):
 
 | Variable | Default | Meaning |
@@ -245,6 +257,7 @@ Per-upstream settings (`<NAME>` is the upper-cased name):
 | `<NAME>_RPS` | `0` (unpaced) | Maximum upstream calls per second. |
 | `<NAME>_TIMEOUT_S` | `30` | Timeout per upstream attempt. |
 | `<NAME>_FORWARD_HEADERS` | none | Extra request headers to forward (comma-separated), e.g. an API-version header. |
+| `<NAME>_USER_AGENT` | none | The `User-Agent` the upstream sees, in place of whatever the client sent (or did not send: httpx's stock agent goes otherwise, which Nominatim refuses with 403). Latin-1 text with no control characters. Unset: the client's is forwarded. |
 
 - A name is lowercase `[a-z][a-z0-9_]{0,31}` and cannot be an LLM provider's or
   `brave`. `GET /status` lists each upstream under `"rest"` (never its key) and
@@ -253,7 +266,9 @@ Per-upstream settings (`<NAME>` is the upper-cased name):
 - Clients send no credentials. Only `Accept`, `Accept-Language`, `Content-Type`,
   `User-Agent` and the `<NAME>_FORWARD_HEADERS` are forwarded; `Authorization`,
   `Cookie` and the upstream's own key header or query parameter are always
-  dropped from the client's request.
+  dropped from the client's request. With `<NAME>_USER_AGENT` set, the client's
+  `User-Agent` is replaced by it: the proxy is the application the upstream
+  deals with, so it identifies itself once, however each client does.
 - A path with a `.` or `..` segment returns `400` and is never forwarded. The
   path is decoded and re-encoded on the way through, so an encoded slash (`%2F`)
   inside a segment reaches the upstream as a plain `/`.

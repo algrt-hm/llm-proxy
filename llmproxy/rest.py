@@ -60,6 +60,10 @@ FORWARDED_HEADERS = {"accept", "accept-language", "content-type", "user-agent"}
 CREDENTIAL_HEADERS = {"authorization", "cookie", "proxy-authorization"}
 # Forwarded but kept out of the trace payload, so it does not split the cache.
 UNTRACED_HEADERS = {"user-agent"}
+# What may go in a header value (RFC 9110 field-value): visible ASCII, space,
+# tab and obs-text (Latin-1's upper half). A control character would be refused
+# by h11 at send time and come back as a 502, not as a configuration error.
+HEADER_VALUE_RE = re.compile(r"[\t\x20-\x7e\x80-\xff]*")
 # Upstream response headers not passed back: hop-by-hop headers, those httpx or
 # Starlette recompute (the body arrives decoded), cookies, and a CDN's own
 # X-Cache, which would read as this proxy's.
@@ -96,6 +100,10 @@ class Upstream:
     rps: float
     cache_ttl_s: float
     forwarded_headers: frozenset[str]
+    # The User-Agent the upstream sees, whatever the client sent; None forwards
+    # the client's. For an API whose terms want the application identified
+    # (Nominatim refuses a library's stock agent with 403).
+    user_agent: str | None
 
 
 _pacers: dict[str, Pacer] = {}
@@ -117,8 +125,9 @@ def get_upstream(name: str) -> Upstream:
     ``<NAME>_BASE_URL`` is required. Optional: ``<NAME>_API_KEY`` with the
     providers' ``<NAME>_AUTH_HEADER`` / ``_AUTH_PREFIX`` / ``_AUTH_QUERY``,
     ``<NAME>_TIMEOUT_S`` (30), ``<NAME>_RPS`` (0 = unpaced),
-    ``<NAME>_CACHE_TTL_S`` (0 = not cached) and ``<NAME>_FORWARD_HEADERS``
-    (comma-separated extra request headers to forward).
+    ``<NAME>_CACHE_TTL_S`` (0 = not cached), ``<NAME>_FORWARD_HEADERS``
+    (comma-separated extra request headers to forward) and
+    ``<NAME>_USER_AGENT`` (sent to the upstream in place of the client's).
 
     Raises ValueError for a name that is not listed or is misconfigured.
     """
@@ -134,6 +143,9 @@ def get_upstream(name: str) -> Upstream:
         raise ValueError(f"{key}_BASE_URL must be set to an http(s) URL")
     api_key = getenv(f"{key}_API_KEY", "").strip() or None
     extra_headers = {header.strip().lower() for header in getenv(f"{key}_FORWARD_HEADERS", "").split(",") if header.strip()}
+    user_agent = getenv(f"{key}_USER_AGENT", "").strip() or None
+    if user_agent is not None and not HEADER_VALUE_RE.fullmatch(user_agent):
+        raise ValueError(f"{key}_USER_AGENT must be a header value: Latin-1 text with no control characters")
     config = ProviderConfig(
         name=name,
         api_key=api_key,
@@ -151,6 +163,7 @@ def get_upstream(name: str) -> Upstream:
         rps=_float_env(f"{key}_RPS", 0.0),
         cache_ttl_s=_float_env(f"{key}_CACHE_TTL_S", 0.0),
         forwarded_headers=frozenset((FORWARDED_HEADERS | extra_headers) - blocked),
+        user_agent=user_agent,
     )
 
 
@@ -169,6 +182,7 @@ def rest_status() -> dict[str, dict[str, object]]:
             "auth": upstream.config.api_key is not None,
             "cache_ttl_s": upstream.cache_ttl_s,
             "rps": upstream.rps,
+            "user_agent": upstream.user_agent,
         }
     return result
 
@@ -177,7 +191,13 @@ def log_rest_upstreams() -> None:
     for name, info in rest_status().items():
         if info["configured"]:
             LOGGER.info(
-                "REST upstream %s -> %s (auth=%s, cache_ttl_s=%s, rps=%s)", name, info["base_url"], info["auth"], info["cache_ttl_s"], info["rps"]
+                "REST upstream %s -> %s (auth=%s, cache_ttl_s=%s, rps=%s, user_agent=%s)",
+                name,
+                info["base_url"],
+                info["auth"],
+                info["cache_ttl_s"],
+                info["rps"],
+                info["user_agent"],
             )
         else:
             LOGGER.warning("REST upstream %s is misconfigured: %s", name, info["detail"])
@@ -267,6 +287,10 @@ async def rest_proxy(name: str, path: str, request: Request) -> Response:
     # copy of the key parameter is dropped; the proxy supplies it.
     params = [(k, v) for k, v in request.query_params.multi_items() if k not in auth_params]
     headers = _forwarded_headers(request, upstream)
+    if upstream.user_agent is not None:
+        # The proxy is the application the upstream deals with: one identity,
+        # whatever each client sends (or fails to send).
+        headers[b"user-agent"] = upstream.user_agent.encode("latin-1")
     trace_payload: dict[str, object] = {"method": method, "path": path, "params": params}
     traced_headers = {k.decode("latin-1"): v.decode("latin-1") for k, v in sorted(headers.items()) if k.decode("latin-1") not in UNTRACED_HEADERS}
     if traced_headers:
