@@ -8,11 +8,15 @@ from yarl import URL
 
 import uvicorn
 
+from llmproxy.constants import PACKAGE_NAME
 from llmproxy.providers import PROVIDERS
 
 BOOL_TRUE = {"1", "true", "yes", "y", "on"}
 RUN_ALT_POSTGRES_ENV = "LLM_PROXY_RUN_ALT_POSTGRES"
 HOST_LABEL_RE = re.compile(r"^[A-Za-z0-9-]{1,63}$")
+LOG_LEVEL_ENV = "LLM_PROXY_LOG_LEVEL"
+LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+DEFAULT_LOG_LEVEL = "INFO"
 
 
 def _env_value(name: str) -> str | None:
@@ -105,6 +109,31 @@ def _validate_db_url_hostname(db_url: str) -> str | None:
     return None
 
 
+def _log_level() -> str:
+    """The proxy's own log level, from LLM_PROXY_LOG_LEVEL (default INFO)."""
+    level = (_env_value(LOG_LEVEL_ENV) or DEFAULT_LOG_LEVEL).upper()
+    if level not in LOG_LEVELS:
+        print(f"{LOG_LEVEL_ENV} must be one of {', '.join(LOG_LEVELS)}, got: {level!r}")
+        raise SystemExit(1)
+    return level
+
+
+def _log_config(level: str) -> dict:
+    """uvicorn's logging config with timestamps, plus the proxy's own logger.
+
+    uvicorn configures only its own loggers. Left alone, the package logger
+    inherits the root logger's WARNING level and has no handler, so every INFO
+    line (configured providers and REST upstreams, retries, rate-limit waits)
+    is dropped and the warnings come out of logging's last-resort handler,
+    bare and untimestamped. Here it shares uvicorn's stderr handler and format.
+    """
+    log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
+    log_config["formatters"]["default"]["fmt"] = "%(asctime)s - %(levelprefix)s %(message)s"
+    log_config["formatters"]["access"]["fmt"] = '%(asctime)s - %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
+    log_config["loggers"][PACKAGE_NAME] = {"handlers": ["default"], "level": level, "propagate": False}
+    return log_config
+
+
 def _is_interactive() -> bool:
     return sys.stdin.isatty() and sys.stdout.isatty()
 
@@ -176,16 +205,14 @@ def main(argv: list[str] | None = None) -> None:
     except ValueError:
         print(f"LLM_PROXY_PORT must be a valid integer, got: {port_raw!r}")
         raise SystemExit(1)
+    log_level = _log_level()
     reload_enabled = _bool_env("LLM_PROXY_RELOAD")
     display_host = "localhost" if host == "0.0.0.0" else host
     base = f"http://{display_host}:{port}"
     print(f"\n  Docs:   {base}/docs")
     print(f"  ReDoc:  {base}/redoc")
     print(f"  OpenAPI JSON: {base}/openapi.json\n")
-    log_config = copy.deepcopy(uvicorn.config.LOGGING_CONFIG)
-    log_config["formatters"]["default"]["fmt"] = "%(asctime)s - %(levelprefix)s %(message)s"
-    log_config["formatters"]["access"]["fmt"] = '%(asctime)s - %(levelprefix)s %(client_addr)s - "%(request_line)s" %(status_code)s'
-    uvicorn.run("llmproxy.app:app", host=host, port=port, reload=reload_enabled, log_config=log_config)
+    uvicorn.run("llmproxy.app:app", host=host, port=port, reload=reload_enabled, log_config=_log_config(log_level))
 
 
 if __name__ == "__main__":

@@ -112,6 +112,7 @@ make run
 | `LLM_PROXY_HOST` | `0.0.0.0` | Server bind address |
 | `LLM_PROXY_PORT` | `8000` | Server port |
 | `LLM_PROXY_RELOAD` | off | Enable dev auto-reload (`1`, `true`, `yes`, `y` or `on`) |
+| `LLM_PROXY_LOG_LEVEL` | `INFO` | The proxy's own log level (`DEBUG`, `INFO`, `WARNING`, `ERROR` or `CRITICAL`): which providers and REST upstreams are configured, retries, rate-limit waits. Written to stderr with uvicorn's timestamped format; uvicorn's own lines stay at `INFO` |
 | `LLM_PROXY_DEFAULT_PROVIDER` | `openai` | Provider used when model has no prefix |
 | `LLM_PROXY_DEFAULT_MODEL` | `deepseek/deepseek-v4-pro` | Model (with optional provider prefix) used when `model` field is omitted or empty |
 | `LLM_PROXY_TIMEOUT_S` | `900` | HTTP request timeout (seconds) |
